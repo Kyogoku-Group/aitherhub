@@ -380,7 +380,12 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
 
     if (parsed.length < 2) return null;
     const startTime = parsed[0]?.realTime || null;
-    return { data: parsed, hasGmv: !!gmvKey, hasViewers: !!viewerKey, hasOrders: !!orderKey, startTime };
+    // Calculate totals from Excel trend data
+    const excelTotalGmv = gmvKey ? parsed.reduce((sum, d) => sum + (d.gmv || 0), 0) : null;
+    const excelTotalOrders = orderKey ? parsed.reduce((sum, d) => sum + (d.orders || 0), 0) : null;
+    const excelMaxViewers = viewerKey ? Math.max(...parsed.map(d => d.viewers || 0)) : null;
+
+    return { data: parsed, hasGmv: !!gmvKey, hasViewers: !!viewerKey, hasOrders: !!orderKey, startTime, excelTotalGmv, excelTotalOrders, excelMaxViewers };
   }, [excelData]);
 
   // Stream start time (from trend data or video filename)
@@ -433,7 +438,12 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
     const parseNum = (v) => { if (typeof v === 'number') return v; if (typeof v === 'string') { const n = parseFloat(v.replace(/,/g, '')); return isNaN(n) ? 0 : n; } return 0; };
     const sortedItems = revenueKey ? [...products].sort((a, b) => parseNum(b[revenueKey]) - parseNum(a[revenueKey])) : products;
 
-    return { items: sortedItems, nameKey, priceKey, quantityKey, revenueKey, categoryKey, displayKeys, top5: sortedItems.slice(0, 5) };
+    // Calculate total GMV from product data
+    const totalProductGmv = revenueKey ? products.reduce((sum, p) => sum + parseNum(p[revenueKey]), 0) : null;
+    const orderCountKey = keys.find(k => /注文|成交件数|order|orders|件数/i.test(k));
+    const totalProductOrders = orderCountKey ? products.reduce((sum, p) => sum + parseNum(p[orderCountKey]), 0) : null;
+
+    return { items: sortedItems, nameKey, priceKey, quantityKey, revenueKey, categoryKey, displayKeys, top5: sortedItems.slice(0, 5), totalProductGmv, totalProductOrders };
   }, [excelData]);
 
   // ── Match exposure product names with Excel product sales data ─
@@ -952,8 +962,8 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
                   </svg>
                   売上 (GMV)
                 </div>
-                <div className="text-2xl font-bold text-gray-900">¥{Math.round(agg.totalGmv).toLocaleString()}</div>
-                <div className="text-xs text-gray-400 mt-1">{agg.totalOrders}件の注文</div>
+                <div className="text-2xl font-bold text-gray-900">¥{Math.round(trendChart?.excelTotalGmv ?? excelProducts?.totalProductGmv ?? agg.totalGmv).toLocaleString()}</div>
+                <div className="text-xs text-gray-400 mt-1">{(trendChart?.excelTotalOrders ?? excelProducts?.totalProductOrders ?? agg.totalOrders)}件の注文</div>
               </div>
               <div className="rounded-xl bg-white border border-gray-200 p-4 shadow-sm">
                 <div className="flex items-center gap-2 text-gray-500 text-xs font-medium mb-1">
@@ -962,7 +972,7 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
                   </svg>
                   視聴者数
                 </div>
-                <div className="text-2xl font-bold text-gray-900">{agg.totalViewers.toLocaleString()}</div>
+                <div className="text-2xl font-bold text-gray-900">{(trendChart?.excelMaxViewers ?? agg.totalViewers).toLocaleString()}</div>
                 <div className="text-xs text-gray-400 mt-1">ピーク視聴者</div>
               </div>
               <div className="rounded-xl bg-white border border-gray-200 p-4 shadow-sm">

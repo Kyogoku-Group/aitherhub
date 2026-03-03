@@ -90,7 +90,47 @@ def safe_json_load(text: str):
         return None
 
 
-# ─── PRODUCT KEYWORD MAP ──────────────────────────────────
+# ─── PRODUCT NAME HELPER ─────────────────────────────────────────────
+def _get_product_name(p: dict) -> str:
+    """
+    商品dictから商品名を柔軟に取得する。
+    TikTok Seller Center等の様々なカラム名に対応。
+    """
+    # 直接キーで検索（優先順位順）
+    direct_keys = [
+        "product_name", "name", "商品名", "商品名称", "商品タイトル",
+        "产品名称", "商品名稱", "Product Name", "Product Title",
+        "sellercom_name", "seller_commodity_name",
+        "상품명", "Tên sản phẩm", "ชื่อสินค้า", "Nama Produk",
+    ]
+    for key in direct_keys:
+        val = p.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+
+    # 部分一致で検索（キーに「商品」「product」「name」等を含むカラム）
+    name_patterns = ["商品", "product", "name", "产品", "상품", "produk"]
+    id_patterns = ["id", "code", "sku"]
+    for key, val in p.items():
+        if not val or not str(val).strip():
+            continue
+        key_lower = key.lower()
+        if any(pat in key_lower for pat in id_patterns):
+            continue
+        if any(pat in key_lower for pat in name_patterns):
+            return str(val).strip()
+
+    # 最終フォールバック: 2番目のカラム（多くのCSVで商品名は2列目）
+    keys = list(p.keys())
+    if len(keys) >= 2:
+        val = p.get(keys[1])
+        if val and str(val).strip() and not str(val).strip().replace('.', '').isdigit():
+            return str(val).strip()
+
+    return ""
+
+
+# ─── PRODUCT KEYWORD MAP ──────────────────────────────────────────────
 def build_product_keyword_map(product_list: list[dict]) -> dict[str, list[str]]:
     """
     商品名からキーワードマップを構築。
@@ -98,7 +138,7 @@ def build_product_keyword_map(product_list: list[dict]) -> dict[str, list[str]]:
     """
     product_keywords: dict[str, list[str]] = {}
     for p in product_list:
-        name = p.get("product_name", p.get("name", p.get("商品名", p.get("商品タイトル", ""))))
+        name = _get_product_name(p)
         if not name:
             continue
         keywords = []
@@ -507,7 +547,7 @@ def build_product_detection_prompt(product_list: list[dict]) -> str:
     """商品リストを含むシステムプロンプトを構築する（v2と同じ高品質プロンプト）"""
     product_names = []
     for i, p in enumerate(product_list):
-        name = p.get("product_name", p.get("name", p.get("商品名", p.get("商品タイトル", f"Product_{i}"))))
+        name = _get_product_name(p) or f"Product_{i}"
         brand = p.get("brand_name", p.get("brand", p.get("ブランド名", p.get("ブランド", ""))))
         if brand:
             product_names.append(f"- {name} ({brand})")
@@ -933,7 +973,7 @@ def fill_brand_names(exposures: list[dict], product_list: list[dict]) -> list[di
     """product_listからbrand_nameとimage_urlを補完する"""
     name_to_info: dict[str, dict] = {}
     for p in product_list:
-        name = p.get("product_name", p.get("name", p.get("商品名", p.get("商品タイトル", ""))))
+        name = _get_product_name(p)
         if name:
             name_to_info[name] = {
                 "brand_name": p.get("brand_name", p.get("brand", p.get("ブランド名", p.get("ブランド", "")))),

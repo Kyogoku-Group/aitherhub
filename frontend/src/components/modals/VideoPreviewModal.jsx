@@ -81,8 +81,8 @@ export default function VideoPreviewModal({
         try {
           setShowCustomLoading(true);
           setIsLoading(true);
-          vid.defaultMuted = true;
-          vid.muted = true;
+          vid.defaultMuted = false;
+          vid.muted = false;
 
           const shouldSkipSeek = isClipPreview || skipSeek;
           const shouldSeek = !shouldSkipSeek && !hasSeeked && Math.abs(vid.currentTime - timeStart) > 0.5;
@@ -148,13 +148,24 @@ export default function VideoPreviewModal({
           await waitForBuffer();
 
           try {
+            // Try playing with sound first
+            vid.muted = false;
             await vid.play();
             setIsLoading(false);
             setIsBuffering(false);
             setTimeout(() => setShowCustomLoading(false), 300);
           } catch {
-            setIsLoading(false);
-            setShowCustomLoading(false);
+            // Autoplay with sound blocked by browser policy - fallback to muted
+            try {
+              vid.muted = true;
+              await vid.play();
+              setIsLoading(false);
+              setIsBuffering(false);
+              setTimeout(() => setShowCustomLoading(false), 300);
+            } catch {
+              setIsLoading(false);
+              setShowCustomLoading(false);
+            }
           }
         } catch (e) {
           console.error("Error seeking/playing video preview:", e);
@@ -268,8 +279,6 @@ export default function VideoPreviewModal({
               src={videoUrl}
               controls
               autoPlay
-              muted
-              defaultMuted
               playsInline
               preload="auto"
               poster=""

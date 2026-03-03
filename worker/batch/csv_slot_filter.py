@@ -144,6 +144,8 @@ KPI_ALIASES = {
     "product_name": [
         "商品名", "商品名称", "产品名称", "商品名稱",
         "Product Name", "product_name", "Product Title",
+        "商品タイトル", "sellercom_name", "seller_commodity_name",
+        "商品", "产品",
         "상품명", "Tên sản phẩm", "ชื่อสินค้า", "Nama Produk",
     ],
     "product_id": [
