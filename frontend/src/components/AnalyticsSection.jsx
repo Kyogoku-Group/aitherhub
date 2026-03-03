@@ -249,14 +249,45 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
 
   // ── Build product color map & stats from exposures ────────────
   const exposureStats = useMemo(() => {
-    const uniqueProducts = [...new Set(exposures.map((e) => e.product_name))];
+    // Build a name-resolution map: Product_N → real product name from Excel
+    const excelNames = (excelData?.products || []).map(p => {
+      const keys = Object.keys(p);
+      const nameKey = keys.find(k => k === '商品名')
+        || keys.find(k => /product_name|name/i.test(k) && !/id/i.test(k))
+        || keys.find(k => /商品名/.test(k))
+        || keys.find(k => /商品/.test(k) && !/ID|id|ＩＤ/.test(k))
+        || keys[1] || keys[0];
+      return nameKey ? p[nameKey] : null;
+    }).filter(Boolean);
+
+    const nameMap = {};
+    for (const exp of exposures) {
+      const raw = exp.product_name;
+      if (nameMap[raw] !== undefined) continue;
+      // Check if it matches Product_N pattern
+      const m = raw.match(/^Product_(\d+)$/i);
+      if (m) {
+        const idx = parseInt(m[1], 10);
+        if (idx < excelNames.length) {
+          nameMap[raw] = excelNames[idx];
+        } else {
+          nameMap[raw] = raw; // no match, keep original
+        }
+      } else {
+        nameMap[raw] = raw; // already a real name
+      }
+    }
+
+    const resolveName = (raw) => nameMap[raw] ?? raw;
+
+    const uniqueProducts = [...new Set(exposures.map((e) => resolveName(e.product_name)))];
     const colorMap = {};
     uniqueProducts.forEach((name, idx) => { colorMap[name] = idx; });
 
-    // Per-product stats
+    // Per-product stats (using resolved names)
     const stats = {};
     for (const exp of exposures) {
-      const name = exp.product_name;
+      const name = resolveName(exp.product_name);
       if (!stats[name]) {
         stats[name] = { name, segments: [], totalDuration: 0, count: 0, colorIdx: colorMap[name] };
       }
@@ -268,8 +299,8 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
 
     // Sort by total duration descending
     const sorted = Object.values(stats).sort((a, b) => b.totalDuration - a.totalDuration);
-    return { colorMap, uniqueProducts, sorted };
-  }, [exposures]);
+    return { colorMap, uniqueProducts, sorted, resolveName };
+  }, [exposures, excelData]);
 
   // ── Aggregate metrics from all phases ──────────────────────────
   const agg = useMemo(() => {
@@ -526,8 +557,8 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
   // ── Filtered exposures based on selected product ──────────────
   const filteredExposures = useMemo(() => {
     if (!selectedProduct) return exposures;
-    return exposures.filter(e => e.product_name === selectedProduct);
-  }, [exposures, selectedProduct]);
+    return exposures.filter(e => exposureStats.resolveName(e.product_name) === selectedProduct);
+  }, [exposures, selectedProduct, exposureStats]);
 
   // ── Handle product click in ranking table ──────────────────────
   const handleProductClick = (productName) => {
@@ -609,18 +640,19 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
       const seen = new Set();
       const uniqueActive = [];
       for (const ap of activeProducts) {
-        if (!seen.has(ap.product_name)) {
-          seen.add(ap.product_name);
-          uniqueActive.push(ap);
+        const resolvedName = exposureStats.resolveName(ap.product_name);
+        if (!seen.has(resolvedName)) {
+          seen.add(resolvedName);
+          uniqueActive.push({ ...ap, resolvedName });
         }
       }
       s += `<br/><span style="font-size:10px;color:#6b7280">\uD83D\uDCE6 表示中:</span><br/>`;
       for (const ap of uniqueActive) {
-        const ci = exposureStats.colorMap[ap.product_name] ?? 0;
-        const pData = productDataLookup[ap.product_name];
+        const ci = exposureStats.colorMap[ap.resolvedName] ?? 0;
+        const pData = productDataLookup[ap.resolvedName];
         const gmvStr = pData?.gmv > 0 ? ` <span style="color:#f97316;font-weight:bold">¥${Math.round(pData.gmv).toLocaleString()}</span>` : "";
         const statsStr = pData ? ` <span style="color:#9ca3af">(${pData.count}回/${formatDurationMinutes(pData.totalDuration)})</span>` : "";
-        s += `<span style="color:${getColor(ci)}">\u25CF</span> <span style="font-size:11px">${ap.product_name}</span>${gmvStr}${statsStr}<br/>`;
+        s += `<span style="color:${getColor(ci)}">\u25CF</span> <span style="font-size:11px">${ap.resolvedName}</span>${gmvStr}${statsStr}<br/>`;
       }
     }
     s += `</div>`;
@@ -724,8 +756,9 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
                       {exposures.map((exp, idx) => {
                         const left = (exp.time_start / videoDuration) * 100;
                         const width = ((exp.time_end - exp.time_start) / videoDuration) * 100;
-                        const ci = exposureStats.colorMap[exp.product_name] ?? 0;
-                        const isFiltered = selectedProduct && exp.product_name !== selectedProduct;
+                        const resolved = exposureStats.resolveName(exp.product_name);
+                        const ci = exposureStats.colorMap[resolved] ?? 0;
+                        const isFiltered = selectedProduct && resolved !== selectedProduct;
                         if (isFiltered) return null;
                         return (
                           <div key={exp.id || idx}
@@ -737,7 +770,7 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
                               backgroundColor: getColor(ci),
                               opacity: Math.max(0.5, exp.confidence || 0.8),
                             }}
-                            title={`${exp.product_name} (${formatTime(exp.time_start)} - ${formatTime(exp.time_end)}) ▶ クリックで再生`}
+                            title={`${resolved} (${formatTime(exp.time_start)} - ${formatTime(exp.time_end)}) ▶ クリックで再生`}
                           />
                         );
                       })}
@@ -778,7 +811,8 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
                       {exposures.map((exp, idx) => {
                         const left = (exp.time_start / videoDuration) * 100;
                         const width = ((exp.time_end - exp.time_start) / videoDuration) * 100;
-                        const ci = exposureStats.colorMap[exp.product_name] ?? 0;
+                        const resolved = exposureStats.resolveName(exp.product_name);
+                        const ci = exposureStats.colorMap[resolved] ?? 0;
                         return (
                           <div key={exp.id || idx}
                             className="absolute top-0 h-full rounded-sm"
@@ -1103,14 +1137,18 @@ export default function AnalyticsSection({ reports1, videoData, onPreviewSegment
                 {exposureListExpanded && (
                   <div className="px-4 pb-4">
                     <div className="flex flex-col gap-2 max-h-96 overflow-y-auto">
-                      {exposures.map((exp, idx) => (
-                        <ExposureRow key={exp.id || idx} exposure={exp}
-                          colorIdx={exposureStats.colorMap[exp.product_name] ?? 0}
-                          onUpdate={handleUpdateExposure} onDelete={handleDeleteExposure}
-                          isEditing={editingId === exp.id} setEditing={setEditingId}
-                          streamStartTime={streamStartTime}
-                        />
-                      ))}
+                      {exposures.map((exp, idx) => {
+                        const resolved = exposureStats.resolveName(exp.product_name);
+                        return (
+                          <ExposureRow key={exp.id || idx}
+                            exposure={{ ...exp, product_name: resolved }}
+                            colorIdx={exposureStats.colorMap[resolved] ?? 0}
+                            onUpdate={handleUpdateExposure} onDelete={handleDeleteExposure}
+                            isEditing={editingId === exp.id} setEditing={setEditingId}
+                            streamStartTime={streamStartTime}
+                          />
+                        );
+                      })}
                     </div>
                     <div className="mt-3">
                       {showAddForm ? (
