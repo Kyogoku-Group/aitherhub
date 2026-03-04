@@ -43,7 +43,9 @@ function emaSmooth(prev, next, alpha = 0.3) {
   return alpha * next + (1 - alpha) * prev;
 }
 
-function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingComplete, externalProgress }) {
+function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingComplete, externalProgress, uploadDurationMs, uploadStartTime }) {
+  // Upload elapsed time (live counter during upload)
+  const [uploadElapsedMs, setUploadElapsedMs] = useState(0);
   const [currentStatus, setCurrentStatus] = useState(initialStatus || 'NEW');
   const [smoothProgress, setSmoothProgress] = useState(externalProgress || 0);
   const [stepProgress, setStepProgress] = useState(0);
@@ -77,6 +79,18 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
   const emaRemainingRef = useRef(null);
   const elapsedTimerRef = useRef(null);
   const phaseDurationsRef = useRef({});
+
+  // Upload elapsed time ticker
+  useEffect(() => {
+    if (!uploadStartTime) {
+      return;
+    }
+    setUploadElapsedMs(Date.now() - uploadStartTime);
+    const timer = setInterval(() => {
+      setUploadElapsedMs(Date.now() - uploadStartTime);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [uploadStartTime]);
 
   // Update smooth progress from external prop if provided (for upload progress)
   const setMonotonicProgress = useCallback((nextProgress) => {
@@ -732,6 +746,14 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
           {renderStepIcon(uploadStepStatus)}
           <span className={`text-sm transition-all duration-500 ease-out ${uploadStepStatus === 'current' ? 'text-gray-800 font-medium' : 'text-green-600'}`}>
             {uploadStep.label}
+            {/* Show upload duration for completed upload */}
+            {uploadStepStatus === 'completed' && uploadDurationMs && uploadDurationMs > 1000 && (
+              <span className="ml-2 text-[11px] text-gray-400 font-normal">{formatDuration(uploadDurationMs)}</span>
+            )}
+            {/* Show live upload elapsed time */}
+            {uploadStepStatus === 'current' && uploadElapsedMs > 1000 && (
+              <span className="ml-2 text-[11px] text-gray-400 font-normal">{formatDuration(uploadElapsedMs)}</span>
+            )}
           </span>
         </div>
 
@@ -810,6 +832,10 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
                 {/* Show phase duration for completed steps */}
                 {isCompleted && phaseDur && phaseDur > 1000 && (
                   <span className="ml-2 text-[11px] text-gray-400 font-normal">{formatDuration(phaseDur)}</span>
+                )}
+                {/* Show live elapsed time for current step */}
+                {isActive && prevStatusStartMsRef.current && (
+                  <LiveStepTimer startMs={prevStatusStartMsRef.current} />
                 )}
               </span>
             </div>
@@ -894,11 +920,26 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
   );
 }
 
+// Live timer component for current step elapsed time
+function LiveStepTimer({ startMs }) {
+  const [elapsed, setElapsed] = useState(Date.now() - startMs);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setElapsed(Date.now() - startMs);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [startMs]);
+  if (elapsed < 1000) return null;
+  return <span className="ml-2 text-[11px] text-gray-400 font-normal">{formatDuration(elapsed)}</span>;
+}
+
 const areProcessingStepsPropsEqual = (prevProps, nextProps) =>
   prevProps.videoId === nextProps.videoId &&
   prevProps.initialStatus === nextProps.initialStatus &&
   prevProps.videoTitle === nextProps.videoTitle &&
   prevProps.externalProgress === nextProps.externalProgress &&
-  prevProps.onProcessingComplete === nextProps.onProcessingComplete;
+  prevProps.onProcessingComplete === nextProps.onProcessingComplete &&
+  prevProps.uploadDurationMs === nextProps.uploadDurationMs &&
+  prevProps.uploadStartTime === nextProps.uploadStartTime;
 
 export default memo(ProcessingSteps, areProcessingStepsPropsEqual);

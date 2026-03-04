@@ -34,6 +34,8 @@ export default function MainContent({
   );
   const [selectedFile, setSelectedFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadStartTime, setUploadStartTime] = useState(null);
+  const [uploadDurationMs, setUploadDurationMs] = useState(null);
   const [processingResume, setProcessingResume] = useState(false);
   const [checkingResume, setCheckingResume] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -522,6 +524,8 @@ export default function MainContent({
     if (uploading) return;
 
     setUploading(true);
+    setUploadStartTime(Date.now());
+    setUploadDurationMs(null);
     setMessage("");
     setProgress(0);
 
@@ -544,6 +548,8 @@ export default function MainContent({
       setSelectedFile(null);
       setResumeUploadId(null);
 
+      // Record upload duration
+      setUploadDurationMs(Date.now() - (uploadStartTime || Date.now()));
       // Set uploaded video ID to start processing tracking
       setUploadedVideoId(video_id);
 
@@ -941,6 +947,8 @@ export default function MainContent({
                       videoTitle={stableProcessingVideoTitle}
                       externalProgress={uploading ? progress : undefined}
                       onProcessingComplete={handleProcessingComplete}
+                      uploadDurationMs={uploadDurationMs}
+                      uploadStartTime={uploading ? uploadStartTime : null}
                     />
                   </div>
                   {/* Allow uploading another video or starting live analysis while current one is processing */}

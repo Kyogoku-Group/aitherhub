@@ -352,8 +352,9 @@ def process_clip_job(payload: dict):
         return False
 
 
-# Timeout for video analysis subprocess (20 minutes hard limit)
-VIDEO_PROCESS_TIMEOUT = int(os.getenv("WORKER_VIDEO_TIMEOUT", str(20 * 60)))
+# Timeout for video analysis subprocess (120 minutes hard limit)
+# Long videos (2h+) can take 60-90 minutes to process
+VIDEO_PROCESS_TIMEOUT = int(os.getenv("WORKER_VIDEO_TIMEOUT", str(120 * 60)))
 
 # Timeout for clip generation subprocess (10 minutes)
 CLIP_PROCESS_TIMEOUT = int(os.getenv("WORKER_CLIP_TIMEOUT", str(10 * 60)))
