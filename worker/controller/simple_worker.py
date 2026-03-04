@@ -8,6 +8,7 @@ import time
 import subprocess
 import fcntl
 import signal
+from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, Future
 from threading import Lock, Thread
@@ -46,6 +47,34 @@ live_monitor_lock = Lock()
 
 # Graceful shutdown flag
 shutdown_requested = False
+
+# --- Poison job log (DLQ) ---
+POISON_LOG = Path(__file__).parent.parent / "poison_jobs.jsonl"
+
+
+def log_error_type(job_id: str, job_type: str, error_type: str, detail: str = ""):
+    """Log structured error type for every failure. Enables error classification."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[worker] ERROR_TYPE={error_type} job={job_id} type={job_type} detail={detail}")
+
+
+def record_poison_job(job_id: str, job_type: str, error_type: str,
+                      dequeue_count: int = 0, payload: dict | None = None):
+    """Append a poison (permanently failed) job to poison_jobs.jsonl for later analysis."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "job_id": job_id,
+        "job_type": job_type,
+        "error_type": error_type,
+        "dequeue_count": dequeue_count,
+        "payload": payload or {},
+    }
+    try:
+        with open(POISON_LOG, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        print(f"[worker] Recorded poison job {job_id} to {POISON_LOG}")
+    except Exception as e:
+        print(f"[worker] Warning: Failed to write poison log: {e}")
 
 
 def signal_handler(signum, frame):
@@ -133,8 +162,7 @@ def process_job(payload: dict, msg_id: str, pop_receipt: str):
 
         return success
     except Exception as e:
-        print(f"[worker] Error processing job {job_id}: {e}")
-        print(f"[worker] Message will reappear after visibility timeout for retry")
+        log_error_type(job_id, job_type, "UNKNOWN", str(e))
         return False
     finally:
         with active_jobs_lock:
@@ -150,7 +178,7 @@ def process_live_monitor_job(payload: dict):
     username = payload.get("username", "")
 
     if not video_id or not username:
-        print("[worker] Invalid live_monitor payload, skipping")
+        log_error_type(video_id or "unknown", "live_monitor", "INPUT_INVALID", "missing video_id or username")
         return False
 
     print(f"[worker] Starting live monitor for @{username} (video_id={video_id})")
@@ -171,7 +199,7 @@ def process_live_monitor_job(payload: dict):
         print(f"[worker] Live monitor completed for @{username} (video_id={video_id})")
         return True
     else:
-        print(f"[worker] Live monitor failed for @{username} with exit code {result.returncode}")
+        log_error_type(video_id, "live_monitor", "SUBPROCESS_FAIL", f"exit_code={result.returncode}")
         return False
 
 
@@ -186,7 +214,7 @@ def process_live_capture_job(payload: dict):
     duration = payload.get("duration", 0)
 
     if not video_id or not live_url:
-        print("[worker] Invalid live_capture payload, skipping")
+        log_error_type(video_id or "unknown", "live_capture", "INPUT_INVALID", "missing video_id or live_url")
         return False
 
     # Extract username from URL for live monitor
@@ -250,7 +278,7 @@ def process_live_capture_job(payload: dict):
         print(f"[worker] Live capture: user is not currently live (video_id={video_id})")
         return True  # Don't retry - user is offline
     else:
-        print(f"[worker] Live capture failed for {video_id} with exit code {result.returncode}")
+        log_error_type(video_id, "live_capture", "SUBPROCESS_FAIL", f"exit_code={result.returncode}")
         return False
 
 
@@ -263,7 +291,7 @@ def process_clip_job(payload: dict):
     time_end = payload.get("time_end")
 
     if not all([clip_id, video_id, blob_url, time_start is not None, time_end is not None]):
-        print("[worker] Invalid clip payload, skipping")
+        log_error_type(clip_id or "unknown", "generate_clip", "INPUT_INVALID", "missing required clip fields")
         return False
 
     phase_index = payload.get("phase_index", -1)
@@ -294,10 +322,10 @@ def process_clip_job(payload: dict):
             print(f"[worker] Clip generation completed for {clip_id}")
             return True
         else:
-            print(f"[worker] Clip generation failed for {clip_id} with exit code {result.returncode}")
+            log_error_type(clip_id, "generate_clip", "FFMPEG_FAIL", f"exit_code={result.returncode}")
             return False
     except subprocess.TimeoutExpired:
-        print(f"[worker] Clip generation TIMED OUT for {clip_id} after {CLIP_PROCESS_TIMEOUT}s")
+        log_error_type(clip_id, "generate_clip", "TIMEOUT_CLIP", f"timeout={CLIP_PROCESS_TIMEOUT}s")
         return False
 
 
@@ -314,7 +342,7 @@ def process_video_job(payload: dict):
     blob_url = payload.get("blob_url")
 
     if not video_id or not blob_url:
-        print("[worker] Invalid payload, skipping")
+        log_error_type(video_id or "unknown", "video_analysis", "INPUT_INVALID", "missing video_id or blob_url")
         return False
 
     print(f"[worker] Starting batch for video_id={video_id}")
@@ -337,10 +365,10 @@ def process_video_job(payload: dict):
             print(f"[worker] Batch completed successfully for {video_id}")
             return True
         else:
-            print(f"[worker] Batch failed for {video_id} with exit code {result.returncode}")
+            log_error_type(video_id, "video_analysis", "SUBPROCESS_FAIL", f"exit_code={result.returncode}")
             return False
     except subprocess.TimeoutExpired:
-        print(f"[worker] Batch TIMED OUT for {video_id} after {VIDEO_PROCESS_TIMEOUT}s")
+        log_error_type(video_id, "video_analysis", "TIMEOUT_VIDEO", f"timeout={VIDEO_PROCESS_TIMEOUT}s")
         # Mark as ERROR so it doesn't stay stuck
         try:
             sys.path.insert(0, BATCH_DIR)
@@ -391,6 +419,10 @@ def poll_and_process(executor: ThreadPoolExecutor):
                     print(f"[worker] POISON MESSAGE detected: job={job_id}, type={job_type}, "
                           f"dequeue_count={msg.dequeue_count} >= {MAX_DEQUEUE_COUNT}. "
                           f"Deleting message and marking video as ERROR.")
+                    log_error_type(job_id, job_type, "POISON_MAX_RETRY",
+                                   f"dequeue_count={msg.dequeue_count}")
+                    record_poison_job(job_id, job_type, "POISON_MAX_RETRY",
+                                      dequeue_count=msg.dequeue_count, payload=payload)
                     delete_message_safe(msg.id, msg.pop_receipt)
                     # Mark video as ERROR in DB so it doesn't stay in 'uploaded' forever
                     if job_type in ("video_analysis", None) and job_id != "unknown":
