@@ -250,7 +250,23 @@ RULES = [
 # ======================================================
 
 def _find_key(entry: dict, candidate_keys: list[str]) -> str | None:
-    """エントリから候補キーにマッチするキーを探す（大文字小文字無視）"""
+    """エントリから候補キーにマッチするキーを探す。
+
+    スコアリングベースの Column Normalizer を使用。
+    完全一致 → 単語境界一致 → 同義語一致 → コアキーワード一致 の順で判定。
+    除外語ペナルティにより gmv_rate 等の誤マッチを防止。
+
+    後方互換: 旧コードと同じシグネチャを維持。
+    """
+    try:
+        from column_normalizer import find_key_scored
+        result = find_key_scored(entry, candidate_keys)
+        if result is not None:
+            return result
+    except ImportError:
+        logger.warning("[CSV_FILTER] column_normalizer not available, falling back to exact match")
+
+    # フォールバック: 旧ロジック（完全一致のみ）
     entry_keys_lower = {k.lower(): k for k in entry.keys()}
     for ck in candidate_keys:
         if ck.lower() in entry_keys_lower:

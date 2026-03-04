@@ -864,7 +864,7 @@ def main():
             logger.info("[EXCEL] Merging sales/trend data into phase_units...")
             from csv_slot_filter import (
                 _find_key, _safe_float, _parse_time_to_seconds,
-                _detect_time_key, compute_slot_scores,
+                _detect_time_key, compute_slot_scores, KPI_ALIASES,
             )
 
             trends = excel_data["trends"]
@@ -872,17 +872,55 @@ def main():
             time_key = _detect_time_key(trends)
             sample = trends[0] if trends else {}
 
-            # CSVカラム名を自動検出（SellerCompass API形式 + 従来の中国語形式に対応）
-            gmv_key = _find_key(sample, ["gmv", "GMV", "成交金额", "gmv_metric_name_short_ui"])
-            order_key = _find_key(sample, ["成交件数", "订单数", "orders", "live_workbench_metric_orders_new", "orders_metric_name_short_ui", "seller_screen_live_core_data_created_orders"])
-            viewer_key = _find_key(sample, ["观看人数", "viewers", "viewer_count", "live_dashboard_follower_analytics_viewer", "live_workbench_metric_views"])
-            like_key = _find_key(sample, ["点赞数", "likes", "like_count", "live_workbench_metric_likes"])
-            comment_key = _find_key(sample, ["评论数", "comments", "comment_count", "live_workbench_metric_comments"])
-            share_key = _find_key(sample, ["分享次数", "shares", "share_count", "live_workbench_metric_shares"])
-            follower_key = _find_key(sample, ["新增粉丝数", "new_followers", "seller_screen_live_core_data_new_followers"])
-            click_key = _find_key(sample, ["商品点击量", "product_clicks", "live_workbench_metric_product_clicks"])
-            conv_key = _find_key(sample, ["点击成交转化率", "click_conversion", "ctor_metric_name_short_ui", "live_workbench_metric_co_new"])
-            gpm_key = _find_key(sample, ["千次观看成交金额", "gmv_per_1k_views", "GPM", "live_workbench_basic_core_data_gpm", "live_workbench_metric_show_gpm_new"])
+            # ---- Column Normalizer 統合 ----
+            # スコアリングベースで全メトリクスを一括検出し、未検出時はアラートを出す
+            try:
+                from column_normalizer import (
+                    detect_all_columns, log_detection_result,
+                    check_critical_metrics, find_best_column,
+                )
+                _use_normalizer = True
+            except ImportError:
+                logger.warning("[CSV_METRICS] column_normalizer not available, using legacy _find_key")
+                _use_normalizer = False
+
+            if _use_normalizer and sample:
+                # 全メトリクスを一括検出
+                detection_result = detect_all_columns(sample)
+                log_detection_result(detection_result, video_id=str(video_id))
+
+                # クリティカルメトリクスのチェック（gmv, orders, viewers, likes）
+                critical_ok, critical_missing = check_critical_metrics(detection_result)
+                if not critical_ok:
+                    logger.error(
+                        "[CSV_METRICS] CRITICAL: Missing essential metrics %s for video %s. "
+                        "Excel column headers may have changed. Available columns: %s",
+                        critical_missing, video_id, list(sample.keys()),
+                    )
+
+                detected = detection_result["detected"]
+                gmv_key = detected.get("gmv")
+                order_key = detected.get("order_count")
+                viewer_key = detected.get("viewer_count")
+                like_key = detected.get("like_count")
+                comment_key = detected.get("comment_count")
+                share_key = detected.get("share_count")
+                follower_key = detected.get("new_followers")
+                click_key = detected.get("product_clicks")
+                conv_key = detected.get("ctor")
+                gpm_key = detected.get("gpm")
+            else:
+                # フォールバック: KPI_ALIASES経由の_find_key
+                gmv_key = _find_key(sample, KPI_ALIASES["gmv"])
+                order_key = _find_key(sample, KPI_ALIASES["order_count"])
+                viewer_key = _find_key(sample, KPI_ALIASES["viewer_count"])
+                like_key = _find_key(sample, KPI_ALIASES["like_count"])
+                comment_key = _find_key(sample, KPI_ALIASES["comment_count"])
+                share_key = _find_key(sample, KPI_ALIASES["share_count"])
+                follower_key = _find_key(sample, KPI_ALIASES["new_followers"])
+                click_key = _find_key(sample, KPI_ALIASES["product_clicks"])
+                conv_key = _find_key(sample, KPI_ALIASES["ctor"])
+                gpm_key = _find_key(sample, KPI_ALIASES["gpm"])
 
             logger.info("[CSV_METRICS] Detected keys: gmv=%s, order=%s, viewer=%s, like=%s, comment=%s, share=%s, follower=%s, click=%s, conv=%s, gpm=%s",
                 gmv_key, order_key, viewer_key, like_key, comment_key, share_key, follower_key, click_key, conv_key, gpm_key)
