@@ -730,6 +730,7 @@ async def get_video_detail(
                 vp.cta_score,
                 vp.audio_features,
                 vp.sales_psychology_tags,
+                vp.human_sales_tags,
                 pi.insight
             FROM video_phases vp
             LEFT JOIN phase_insights pi ON pi.video_id = vp.video_id AND pi.phase_index = vp.phase_index
@@ -778,6 +779,7 @@ async def get_video_detail(
                     NULL as cta_score,
                     NULL as audio_features,
                     NULL as sales_psychology_tags,
+                    NULL as human_sales_tags,
                     pi.insight
                 FROM video_phases vp
                 LEFT JOIN phase_insights pi ON pi.video_id = vp.video_id AND pi.phase_index = vp.phase_index
@@ -879,6 +881,15 @@ async def get_video_detail(
                 except (json.JSONDecodeError, TypeError):
                     pass
 
+                # Parse human_sales_tags JSON text
+                human_tags_parsed = None
+                try:
+                    raw_human_tags = getattr(r, 'human_sales_tags', None)
+                    if raw_human_tags:
+                        human_tags_parsed = json.loads(raw_human_tags) if isinstance(raw_human_tags, str) else raw_human_tags
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
                 report1_items.append({
                     "phase_index": int(r.phase_index),
                     "phase_description": r.phase_description,
@@ -891,6 +902,7 @@ async def get_video_detail(
                     "cta_score": getattr(r, 'cta_score', None),
                     "audio_features": audio_features_parsed,
                     "sales_psychology_tags": sales_tags_parsed,
+                    "human_sales_tags": human_tags_parsed,
                     "csv_metrics": {
                         "gmv": r.gmv,
                         "order_count": r.order_count,
@@ -1659,6 +1671,87 @@ async def rate_phase(
     except Exception as exc:
         logger.exception(f"Failed to rate phase: {exc}")
         raise HTTPException(status_code=500, detail=f"Failed to rate phase: {exc}")
+
+
+# =========================================================
+# Human Sales Tags API (Human-in-the-loop)
+# =========================================================
+
+ALL_SALES_TAGS = {
+    "HOOK", "EMPATHY", "PROBLEM", "EDUCATION", "SOLUTION",
+    "DEMONSTRATION", "COMPARISON", "PROOF", "TRUST", "SOCIAL_PROOF",
+    "OBJECTION_HANDLING", "URGENCY", "LIMITED_OFFER", "BONUS", "CTA",
+}
+
+
+@router.patch("/{video_id}/phases/{phase_index}/tags")
+async def update_human_sales_tags(
+    video_id: str,
+    phase_index: int,
+    request_body: dict,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """
+    Save human-corrected sales psychology tags for a specific phase.
+    Body:
+    {
+        "human_sales_tags": ["HOOK", "EMPATHY", "CTA"]
+    }
+    """
+    try:
+        user_id = user.get("user_id") or user.get("id")
+        tags = request_body.get("human_sales_tags")
+
+        if tags is None or not isinstance(tags, list):
+            raise HTTPException(status_code=400, detail="human_sales_tags must be a list of tag strings")
+
+        # Validate tags
+        invalid = [t for t in tags if t not in ALL_SALES_TAGS]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"Invalid tags: {invalid}. Valid: {sorted(ALL_SALES_TAGS)}")
+
+        # Verify video belongs to user
+        video_repo = VideoRepository(lambda: db)
+        video = await video_repo.get_video_by_id(video_id)
+        if not video:
+            raise HTTPException(status_code=404, detail="Video not found")
+        if str(getattr(video, "user_id", None)) != str(user_id):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        tags_json = json.dumps(tags)
+
+        sql_update = text("""
+            UPDATE video_phases
+            SET human_sales_tags = :tags,
+                updated_at = NOW()
+            WHERE video_id = :video_id AND phase_index = :phase_index
+        """)
+        result = await db.execute(sql_update, {
+            "tags": tags_json,
+            "video_id": video_id,
+            "phase_index": phase_index,
+        })
+        await db.commit()
+
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Phase not found")
+
+        logger.info(f"Human tags saved: video={video_id}, phase={phase_index}, tags={tags}")
+
+        return {
+            "success": True,
+            "video_id": video_id,
+            "phase_index": phase_index,
+            "human_sales_tags": tags,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(f"Failed to save human sales tags: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to save human sales tags: {exc}")
 
 
 # =========================================================

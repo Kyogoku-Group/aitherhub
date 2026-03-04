@@ -547,6 +547,22 @@ class VideoService extends BaseApiService {
   }
 
   // =========================================================
+  // Human Sales Tags API (Human-in-the-loop)
+  // =========================================================
+
+  async updateHumanSalesTags(videoId, phaseIndex, tags) {
+    try {
+      const response = await this.patch(`/api/v1/videos/${videoId}/phases/${phaseIndex}/tags`, {
+        human_sales_tags: tags,
+      });
+      return response;
+    } catch (error) {
+      console.warn('Failed to update human sales tags:', error);
+      throw error;
+    }
+  }
+
+  // =========================================================
   // Product Exposure Timeline API
   // =========================================================
 

@@ -112,6 +112,12 @@ export default function VideoDetail({ videoData }) {
   const [phaseRatings, setPhaseRatings] = useState({});
   const [ratingComments, setRatingComments] = useState({});
 
+  // Human-in-the-loop Sales Tags state
+  // tagEditState: { [phaseIndex]: { editing: bool, saving: bool, saved: bool } }
+  const [tagEditState, setTagEditState] = useState({});
+  // humanTags: { [phaseIndex]: string[] } — confirmed/edited tags
+  const [humanTags, setHumanTags] = useState({});
+
   // Initialize ratings from existing data
   useEffect(() => {
     if (!videoData?.reports_1) return;
@@ -128,6 +134,19 @@ export default function VideoDetail({ videoData }) {
     }
     if (Object.keys(initialRatings).length > 0) setPhaseRatings(initialRatings);
     if (Object.keys(initialComments).length > 0) setRatingComments(initialComments);
+  }, [videoData?.reports_1]);
+
+  // Initialize human tags from existing data
+  useEffect(() => {
+    if (!videoData?.reports_1) return;
+    const initial = {};
+    for (const item of videoData.reports_1) {
+      const key = item.phase_index ?? 0;
+      if (item.human_sales_tags) {
+        initial[key] = item.human_sales_tags;
+      }
+    }
+    if (Object.keys(initial).length > 0) setHumanTags(initial);
   }, [videoData?.reports_1]);
 
   // Load existing clip statuses when video loads
@@ -205,6 +224,86 @@ export default function VideoDetail({ videoData }) {
           [phaseIndex]: { ...prev[phaseIndex], saved: false },
         }));
       });
+  };
+
+  // ---- Human-in-the-loop Sales Tags handlers ----
+  const ALL_SALES_TAGS = [
+    'HOOK', 'EMPATHY', 'PROBLEM', 'EDUCATION', 'SOLUTION',
+    'DEMONSTRATION', 'COMPARISON', 'PROOF', 'TRUST', 'SOCIAL_PROOF',
+    'OBJECTION_HANDLING', 'URGENCY', 'LIMITED_OFFER', 'BONUS', 'CTA',
+  ];
+  const SALES_TAG_CONFIG = {
+    HOOK: { label: 'HOOK', color: 'bg-purple-100 text-purple-700 border-purple-300' },
+    EMPATHY: { label: '共感', color: 'bg-pink-100 text-pink-700 border-pink-300' },
+    PROBLEM: { label: '問題', color: 'bg-red-50 text-red-600 border-red-200' },
+    EDUCATION: { label: '教育', color: 'bg-blue-100 text-blue-700 border-blue-300' },
+    SOLUTION: { label: '解決', color: 'bg-green-100 text-green-700 border-green-300' },
+    DEMONSTRATION: { label: 'デモ', color: 'bg-teal-100 text-teal-700 border-teal-300' },
+    COMPARISON: { label: '比較', color: 'bg-indigo-100 text-indigo-700 border-indigo-300' },
+    PROOF: { label: '証拠', color: 'bg-cyan-100 text-cyan-700 border-cyan-300' },
+    TRUST: { label: '信頼', color: 'bg-emerald-100 text-emerald-700 border-emerald-300' },
+    SOCIAL_PROOF: { label: '社会証明', color: 'bg-violet-100 text-violet-700 border-violet-300' },
+    OBJECTION_HANDLING: { label: '反論処理', color: 'bg-amber-100 text-amber-700 border-amber-300' },
+    URGENCY: { label: '緊急', color: 'bg-orange-100 text-orange-700 border-orange-300' },
+    LIMITED_OFFER: { label: '限定', color: 'bg-rose-100 text-rose-700 border-rose-300' },
+    BONUS: { label: '特典', color: 'bg-lime-100 text-lime-700 border-lime-300' },
+    CTA: { label: 'CTA', color: 'bg-red-100 text-red-700 border-red-300' },
+  };
+
+  const handleTagEditStart = (phaseIndex, aiTags) => {
+    // If no human tags yet, pre-fill with AI tags
+    if (!humanTags[phaseIndex]) {
+      setHumanTags(prev => ({ ...prev, [phaseIndex]: [...(aiTags || [])] }));
+    }
+    setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: true, saving: false, saved: false } }));
+  };
+
+  const handleTagToggle = (phaseIndex, tag) => {
+    setHumanTags(prev => {
+      const current = prev[phaseIndex] || [];
+      if (current.includes(tag)) {
+        return { ...prev, [phaseIndex]: current.filter(t => t !== tag) };
+      } else {
+        return { ...prev, [phaseIndex]: [...current, tag] };
+      }
+    });
+  };
+
+  const handleTagConfirm = (phaseIndex, aiTags) => {
+    // "Correct" = accept AI tags as-is
+    const tags = aiTags || [];
+    setHumanTags(prev => ({ ...prev, [phaseIndex]: [...tags] }));
+    setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: true, saved: false } }));
+    showToast('タグ確認済み');
+    VideoService.updateHumanSalesTags(videoData.id, phaseIndex, tags)
+      .then(() => {
+        setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: false, saved: true } }));
+      })
+      .catch(err => {
+        console.error('Failed to confirm tags:', err);
+        showToast('保存に失敗しました', 'error');
+        setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: false, saved: false } }));
+      });
+  };
+
+  const handleTagSave = (phaseIndex) => {
+    const tags = humanTags[phaseIndex] || [];
+    setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: true, saved: false } }));
+    showToast('タグ保存中...');
+    VideoService.updateHumanSalesTags(videoData.id, phaseIndex, tags)
+      .then(() => {
+        setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: false, saved: true } }));
+        showToast('タグ保存済み');
+      })
+      .catch(err => {
+        console.error('Failed to save tags:', err);
+        showToast('保存に失敗しました', 'error');
+        setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: true, saving: false, saved: false } }));
+      });
+  };
+
+  const handleTagEditCancel = (phaseIndex) => {
+    setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: false, saved: prev[phaseIndex]?.saved || false } }));
   };
 
   const handleClipGeneration = async (item, phaseIndex) => {
@@ -1141,6 +1240,123 @@ export default function VideoDetail({ videoData }) {
                                     </div>
                                   </div>
                                 </div>
+
+                                {/* Sales Psychology Tags - Human-in-the-loop Edit Section */}
+                                {item.sales_psychology_tags && item.sales_psychology_tags.length > 0 && (
+                                  <div className="pt-3 mt-3 border-t border-gray-200" onClick={(e) => e.stopPropagation()}>
+                                    <div className="flex items-start gap-4">
+                                      <div className="text-indigo-500">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 flex-shrink-0">
+                                          <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>
+                                        </svg>
+                                      </div>
+                                      <div className="flex-1 min-w-0">
+                                        <div className="flex items-center gap-2 mb-2">
+                                          <span className="text-indigo-600 font-medium text-xs">販売心理タグ</span>
+                                          {tagEditState[itemKey]?.saved && !tagEditState[itemKey]?.editing && (
+                                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[8px] font-medium bg-green-100 text-green-600 border border-green-200">
+                                              <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                              確認済み
+                                            </span>
+                                          )}
+                                          {humanTags[itemKey] && !tagEditState[itemKey]?.editing && (
+                                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[8px] font-medium bg-blue-100 text-blue-600 border border-blue-200">
+                                              人間修正
+                                            </span>
+                                          )}
+                                          {tagEditState[itemKey]?.saving && (
+                                            <div className="w-3 h-3 rounded-full border-2 border-gray-300 border-t-indigo-500 animate-spin" />
+                                          )}
+                                        </div>
+
+                                        {/* Display mode: show tags with correct/edit buttons */}
+                                        {!tagEditState[itemKey]?.editing && (
+                                          <div>
+                                            <div className="flex flex-wrap gap-1 mb-2">
+                                              {(humanTags[itemKey] || item.sales_psychology_tags).map((tag) => {
+                                                const cfg = SALES_TAG_CONFIG[tag] || { label: tag, color: 'bg-gray-100 text-gray-600 border-gray-300' };
+                                                return (
+                                                  <span key={tag} className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold border ${cfg.color}`}>
+                                                    {cfg.label}
+                                                  </span>
+                                                );
+                                              })}
+                                            </div>
+                                            {!tagEditState[itemKey]?.saved && !humanTags[itemKey] && (
+                                              <div className="flex items-center gap-2">
+                                                <button
+                                                  onClick={() => handleTagConfirm(itemKey, item.sales_psychology_tags)}
+                                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-medium bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition-colors"
+                                                >
+                                                  <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                                  正しい
+                                                </button>
+                                                <button
+                                                  onClick={() => handleTagEditStart(itemKey, item.sales_psychology_tags)}
+                                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-medium bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-colors"
+                                                >
+                                                  <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                                  修正
+                                                </button>
+                                              </div>
+                                            )}
+                                            {(tagEditState[itemKey]?.saved || humanTags[itemKey]) && (
+                                              <button
+                                                onClick={() => handleTagEditStart(itemKey, humanTags[itemKey] || item.sales_psychology_tags)}
+                                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-medium bg-gray-50 text-gray-600 border border-gray-200 hover:bg-gray-100 transition-colors"
+                                              >
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                                再修正
+                                              </button>
+                                            )}
+                                          </div>
+                                        )}
+
+                                        {/* Edit mode: checkbox grid */}
+                                        {tagEditState[itemKey]?.editing && (
+                                          <div>
+                                            <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5 mb-3">
+                                              {ALL_SALES_TAGS.map((tag) => {
+                                                const cfg = SALES_TAG_CONFIG[tag];
+                                                const isSelected = (humanTags[itemKey] || []).includes(tag);
+                                                return (
+                                                  <button
+                                                    key={tag}
+                                                    onClick={() => handleTagToggle(itemKey, tag)}
+                                                    className={`flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg text-[9px] font-semibold border transition-all duration-150 ${
+                                                      isSelected
+                                                        ? `${cfg.color} ring-2 ring-offset-1 ring-indigo-400`
+                                                        : 'bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100'
+                                                    }`}
+                                                  >
+                                                    {isSelected && (
+                                                      <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                                                    )}
+                                                    {cfg.label}
+                                                  </button>
+                                                );
+                                              })}
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                              <button
+                                                onClick={() => handleTagSave(itemKey)}
+                                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-medium bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
+                                              >
+                                                保存
+                                              </button>
+                                              <button
+                                                onClick={() => handleTagEditCancel(itemKey)}
+                                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-medium bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200 transition-colors"
+                                              >
+                                                キャンセル
+                                              </button>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
 
                                 {/* TikTok Clip Generation Button */}
                                 {item.time_start != null && item.time_end != null && (() => {
