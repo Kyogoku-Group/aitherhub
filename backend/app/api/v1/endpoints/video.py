@@ -612,6 +612,8 @@ async def stream_video_status(
                             "step_progress": current_step_progress,
                             "message": message,
                             "updated_at": video.updated_at.isoformat() if video.updated_at else None,
+                            "created_at": video.created_at.isoformat() if video.created_at else None,
+                            "server_now": datetime.utcnow().isoformat(),
                         }
 
                         yield f"data: {json.dumps(payload)}\n\n"

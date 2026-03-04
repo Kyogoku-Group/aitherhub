@@ -8,20 +8,70 @@ const normalizeProcessingStatus = (status) => {
   return status;
 };
 
+// ── localStorage helpers ──────────────────────────────────────────
+const STORAGE_PREFIX = 'video-progress:';
+
+function loadTimingState(videoId) {
+  try {
+    const raw = localStorage.getItem(STORAGE_PREFIX + videoId);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function saveTimingState(videoId, state) {
+  try {
+    localStorage.setItem(STORAGE_PREFIX + videoId, JSON.stringify(state));
+  } catch { /* quota exceeded – ignore */ }
+}
+
+function clearTimingState(videoId) {
+  try { localStorage.removeItem(STORAGE_PREFIX + videoId); } catch { /* noop */ }
+}
+
+// ── Time formatting ───────────────────────────────────────────────
+function formatDuration(ms) {
+  if (!ms || ms < 0) return '--:--';
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+// ── EMA helper ────────────────────────────────────────────────────
+function emaSmooth(prev, next, alpha = 0.3) {
+  if (prev === null || prev === undefined) return next;
+  return alpha * next + (1 - alpha) * prev;
+}
+
 function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingComplete, externalProgress }) {
   const [currentStatus, setCurrentStatus] = useState(initialStatus || 'NEW');
   const [smoothProgress, setSmoothProgress] = useState(externalProgress || 0);
   const [stepProgress, setStepProgress] = useState(0);
   const [errorMessage, setErrorMessage] = useState(null);
   const [_usePolling, setUsePolling] = useState(false);
+
+  // ── Timing state ──
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [estimatedRemainingMs, setEstimatedRemainingMs] = useState(null);
+  const [phaseDurations, setPhaseDurations] = useState({}); // { stepKey: durationMs }
+
   const statusStreamRef = useRef(null);
   const progressIntervalRef = useRef(null);
   const pollingIntervalRef = useRef(null);
   const lastStatusChangeRef = useRef(0);
   const retryCountRef = useRef(0);
-  const lastInitializedVideoIdRef = useRef(null); // Track last initialized videoId
+  const lastInitializedVideoIdRef = useRef(null);
   const maxProgressRef = useRef(0);
   const MAX_SSE_RETRIES = 2;
+
+  // ── Timing refs (not state to avoid re-renders) ──
+  const clockSkewMsRef = useRef(null);        // clientNow - serverNow (measured once)
+  const processingStartMsRef = useRef(null);   // server created_at in client-adjusted ms
+  const prevStatusRef = useRef(null);
+  const prevStatusStartMsRef = useRef(null);   // when prev status started (client-adjusted)
+  const emaRemainingRef = useRef(null);
+  const elapsedTimerRef = useRef(null);
+  const phaseDurationsRef = useRef({});
 
   // Update smooth progress from external prop if provided (for upload progress)
   const setMonotonicProgress = useCallback((nextProgress) => {
@@ -99,6 +149,110 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
     return ceilingMap[status] ?? 99;
   }, []);
 
+  // ── Timing: calibrate clock skew & track phase transitions ──
+  const handleTimingUpdate = useCallback((data) => {
+    const now = Date.now();
+
+    // 1) Calibrate clock skew (once per SSE session)
+    if (clockSkewMsRef.current === null && data.server_now) {
+      const serverNowMs = Date.parse(data.server_now);
+      if (!isNaN(serverNowMs)) {
+        clockSkewMsRef.current = now - serverNowMs;
+      }
+    }
+    const skew = clockSkewMsRef.current || 0;
+
+    // 2) Set processing start time from created_at (once)
+    if (processingStartMsRef.current === null && data.created_at) {
+      const createdMs = Date.parse(data.created_at);
+      if (!isNaN(createdMs)) {
+        processingStartMsRef.current = createdMs + skew;
+        // Also try to restore from localStorage
+        const saved = loadTimingState(data.video_id || videoId);
+        if (saved && saved.phaseDurations) {
+          phaseDurationsRef.current = saved.phaseDurations;
+          setPhaseDurations(saved.phaseDurations);
+        }
+        if (saved && saved.emaRemaining !== undefined) {
+          emaRemainingRef.current = saved.emaRemaining;
+        }
+      }
+    }
+
+    // 3) Track phase transitions
+    const nextStatus = normalizeProcessingStatus(data.status);
+    const prevStatus = prevStatusRef.current;
+
+    if (prevStatus && prevStatus !== nextStatus && prevStatusStartMsRef.current) {
+      // Record duration of the previous phase
+      const phaseDuration = now - prevStatusStartMsRef.current;
+      phaseDurationsRef.current = {
+        ...phaseDurationsRef.current,
+        [prevStatus]: (phaseDurationsRef.current[prevStatus] || 0) + phaseDuration,
+      };
+      setPhaseDurations({ ...phaseDurationsRef.current });
+    }
+
+    if (prevStatus !== nextStatus) {
+      prevStatusRef.current = nextStatus;
+      prevStatusStartMsRef.current = now;
+    }
+
+    // 4) Compute elapsed time
+    if (processingStartMsRef.current) {
+      const elapsed = now - processingStartMsRef.current;
+      setElapsedMs(elapsed);
+
+      // 5) Compute estimated remaining (only when progress >= 3%)
+      const progress = typeof data.progress === 'number' ? data.progress : calculateProgressFromStatus(nextStatus);
+      if (progress >= 3 && progress < 100) {
+        const rawRemaining = (elapsed / progress) * (100 - progress);
+        // Clamp between 1 min and 60 min
+        const clamped = Math.max(60_000, Math.min(rawRemaining, 3_600_000));
+        emaRemainingRef.current = emaSmooth(emaRemainingRef.current, clamped, 0.3);
+        setEstimatedRemainingMs(emaRemainingRef.current);
+      } else if (progress >= 100) {
+        setEstimatedRemainingMs(0);
+      }
+    }
+
+    // 6) Persist to localStorage
+    saveTimingState(data.video_id || videoId, {
+      clockSkewMs: clockSkewMsRef.current,
+      lastStatus: nextStatus,
+      stepStartServerAt: data.updated_at,
+      lastProgress: data.progress,
+      phaseDurations: phaseDurationsRef.current,
+      emaRemaining: emaRemainingRef.current,
+    });
+  }, [videoId, calculateProgressFromStatus]);
+
+  // ── Elapsed time ticker (updates every second) ──
+  useEffect(() => {
+    elapsedTimerRef.current = setInterval(() => {
+      if (processingStartMsRef.current && currentStatus !== 'DONE' && currentStatus !== 'ERROR') {
+        const elapsed = Date.now() - processingStartMsRef.current;
+        setElapsedMs(elapsed);
+
+        // Also update remaining estimate based on current progress
+        const progress = smoothProgress;
+        if (progress >= 3 && progress < 100 && elapsed > 0) {
+          const rawRemaining = (elapsed / progress) * (100 - progress);
+          const clamped = Math.max(60_000, Math.min(rawRemaining, 3_600_000));
+          emaRemainingRef.current = emaSmooth(emaRemainingRef.current, clamped, 0.15);
+          setEstimatedRemainingMs(emaRemainingRef.current);
+        }
+      }
+    }, 1000);
+
+    return () => {
+      if (elapsedTimerRef.current) {
+        clearInterval(elapsedTimerRef.current);
+        elapsedTimerRef.current = null;
+      }
+    };
+  }, [currentStatus, smoothProgress]);
+
   // Start gradual progress increase
   const startGradualProgress = useCallback((targetProgress, status) => {
     // Clear any existing interval
@@ -110,8 +264,6 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
     const boundedTarget = Math.min(targetProgress, ceiling);
     setMonotonicProgress(boundedTarget);
 
-    // Adjust speed based on the step: compression is fast (non-blocking background),
-    // so use faster increments. Other steps use moderate speed.
     const isQuickStep = status === 'STEP_COMPRESS_1080P' || status === 'STEP_0_EXTRACT_FRAMES';
     const isLongStep = status === 'STEP_3_TRANSCRIBE_AUDIO' || status === 'STEP_2_EXTRACT_METRICS';
     const minIncrement = isQuickStep ? 0.3 : isLongStep ? 0.1 : 0.5;
@@ -119,7 +271,6 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
     const minInterval = isQuickStep ? 500 : isLongStep ? 3000 : 1500;
     const maxInterval = isQuickStep ? 1200 : isLongStep ? 6000 : 3000;
 
-    // Start interval to gradually increase progress
     progressIntervalRef.current = setInterval(() => {
       setSmoothProgress(prev => {
         if (prev < 0) return prev;
@@ -128,7 +279,6 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
         const monotonicProgress = Math.max(newProgress, maxProgressRef.current);
         maxProgressRef.current = monotonicProgress;
 
-        // Stop if we've reached the max allowed progress for this step
         if (monotonicProgress >= ceiling) {
           if (progressIntervalRef.current) {
             clearInterval(progressIntervalRef.current);
@@ -142,14 +292,14 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
     }, minInterval + Math.random() * (maxInterval - minInterval));
   }, [calculateProgressCeilingFromStatus, setMonotonicProgress]);
 
-  // Callback when processing completes - memoize to prevent re-creation
+  // Callback when processing completes
   const handleProcessingComplete = useCallback(() => {
     if (onProcessingComplete) {
       onProcessingComplete();
     }
   }, [onProcessingComplete]);
 
-  // Polling fallback - fetch status periodically
+  // Polling fallback
   const startPolling = useCallback(() => {
     if (!videoId) return;
 
@@ -184,7 +334,16 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
           }
           lastStatusChangeRef.current = Date.now();
 
-          // Stop polling if done or error
+          // Update timing from polling data
+          handleTimingUpdate({
+            status: newStatus,
+            progress,
+            created_at: response.created_at,
+            updated_at: response.updated_at,
+            server_now: response.server_now,
+            video_id: videoId,
+          });
+
           if (newStatus === 'DONE' || newStatus === 'ERROR') {
             if (pollingIntervalRef.current) {
               clearInterval(pollingIntervalRef.current);
@@ -197,14 +356,12 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
         }
       } catch (err) {
         console.error('Polling error:', err);
-        // Continue polling even on error - might be transient
       }
     };
 
-    // Poll immediately, then every 5 seconds
     poll();
     pollingIntervalRef.current = setInterval(poll, 5000);
-  }, [videoId, calculateProgressFromStatus, startGradualProgress, handleProcessingComplete]);
+  }, [videoId, calculateProgressFromStatus, calculateProgressCeilingFromStatus, startGradualProgress, handleProcessingComplete, handleTimingUpdate, setMonotonicProgress]);
 
   // Stream status updates if video is processing
   useEffect(() => {
@@ -221,9 +378,30 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
       });
       lastStatusChangeRef.current = Date.now();
       retryCountRef.current = 0;
+
+      // Reset timing state for new video
+      clockSkewMsRef.current = null;
+      processingStartMsRef.current = null;
+      prevStatusRef.current = null;
+      prevStatusStartMsRef.current = null;
+      emaRemainingRef.current = null;
+      phaseDurationsRef.current = {};
+      setElapsedMs(0);
+      setEstimatedRemainingMs(null);
+      setPhaseDurations({});
+
+      // Try to restore timing from localStorage
+      const saved = loadTimingState(videoId);
+      if (saved) {
+        if (saved.clockSkewMs !== undefined) clockSkewMsRef.current = saved.clockSkewMs;
+        if (saved.phaseDurations) {
+          phaseDurationsRef.current = saved.phaseDurations;
+          setPhaseDurations(saved.phaseDurations);
+        }
+        if (saved.emaRemaining !== undefined) emaRemainingRef.current = saved.emaRemaining;
+      }
     }
 
-    // Only stream/poll if video exists
     if (!videoId) {
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
@@ -236,22 +414,18 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
       return;
     }
 
-    // Skip if already initialized for this same videoId (prevents StrictMode double-mount)
     if (lastInitializedVideoIdRef.current === videoId) {
       console.log(`⚠️  Stream already initialized for video ${videoId}, skipping duplicate`);
       return;
     }
 
-    // Close any existing stream first
     if (statusStreamRef.current) {
       statusStreamRef.current.close();
       statusStreamRef.current = null;
     }
 
-    // Mark this videoId as initialized
     lastInitializedVideoIdRef.current = videoId;
 
-    // Start SSE stream
     statusStreamRef.current = VideoService.streamVideoStatus({
       videoId: videoId,
 
@@ -259,26 +433,22 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
         console.log(`📡 SSE Update: ${data.status}, step_progress: ${data.step_progress}`);
         const nextStatus = normalizeProcessingStatus(data.status);
         setCurrentStatus(nextStatus);
-        setErrorMessage(null); // Clear any previous errors
-        retryCountRef.current = 0; // Reset retry count on success
+        setErrorMessage(null);
+        retryCountRef.current = 0;
 
-        // Track step-level progress
         const serverStepProgress = typeof data.step_progress === 'number' ? data.step_progress : 0;
         setStepProgress(serverStepProgress);
 
-        // Calculate progress using step_progress for finer granularity
         const floor = calculateProgressFromStatus(nextStatus);
         const ceiling = calculateProgressCeilingFromStatus(nextStatus);
         let safeProgress;
         if (serverStepProgress > 0 && serverStepProgress < 100) {
-          // Interpolate between floor and ceiling based on step_progress
           safeProgress = Math.round(floor + (ceiling - floor) * serverStepProgress / 100);
         } else {
           const serverProgress = typeof data.progress === 'number' ? data.progress : 0;
           safeProgress = Math.max(serverProgress, floor);
         }
 
-        // When step_progress is available, set progress directly instead of gradual animation
         if (serverStepProgress > 0) {
           if (progressIntervalRef.current) {
             clearInterval(progressIntervalRef.current);
@@ -290,26 +460,42 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
         }
         lastStatusChangeRef.current = Date.now();
 
-        // Auto-stop stream if done or error
+        // ── Timing update ──
+        handleTimingUpdate(data);
+
         if (nextStatus === 'DONE' || nextStatus === 'ERROR') {
           console.log(`✅ Stream auto-closing due to status: ${nextStatus}`);
           if (statusStreamRef.current) {
             statusStreamRef.current.close();
             statusStreamRef.current = null;
           }
-          // Notify parent when processing is done
-          if (nextStatus === 'DONE' && handleProcessingComplete) {
-            handleProcessingComplete();
+          if (nextStatus === 'DONE') {
+            // Record final phase duration
+            if (prevStatusRef.current && prevStatusStartMsRef.current) {
+              const finalDuration = Date.now() - prevStatusStartMsRef.current;
+              phaseDurationsRef.current = {
+                ...phaseDurationsRef.current,
+                [prevStatusRef.current]: (phaseDurationsRef.current[prevStatusRef.current] || 0) + finalDuration,
+              };
+              setPhaseDurations({ ...phaseDurationsRef.current });
+            }
+            setEstimatedRemainingMs(0);
+            if (handleProcessingComplete) {
+              handleProcessingComplete();
+            }
+          }
+          if (nextStatus === 'ERROR') {
+            setEstimatedRemainingMs(null);
           }
         }
       },
 
       onDone: async () => {
         console.log('✅ SSE Stream completed');
-        // Processing complete - notify parent
         setCurrentStatus('DONE');
         maxProgressRef.current = 100;
         setSmoothProgress(100);
+        setEstimatedRemainingMs(0);
         if (handleProcessingComplete) {
           handleProcessingComplete();
         }
@@ -319,7 +505,6 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
         console.error('❌ Status stream error:', error);
         retryCountRef.current++;
 
-        // If we've exceeded retry attempts, fallback to polling
         if (retryCountRef.current > MAX_SSE_RETRIES) {
           console.warn(`SSE failed ${MAX_SSE_RETRIES} times, falling back to polling`);
           setErrorMessage('リアルタイム更新に接続できません。定期的に更新しています。');
@@ -330,8 +515,6 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
       },
     });
 
-    // Cleanup - only close stream if videoId changed (switching videos)
-    // Don't close in StrictMode when videoId stays the same
     return () => {
       const videoIdChanged = lastInitializedVideoIdRef.current !== videoId;
 
@@ -343,7 +526,6 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
         }
       }
 
-      // Always clear intervals
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
         progressIntervalRef.current = null;
@@ -353,10 +535,19 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
         pollingIntervalRef.current = null;
       }
     };
-  }, [videoId]); // Only depend on videoId, not initialStatus which changes frequently
+  }, [videoId]);
+
+  // Clean up localStorage when DONE
+  useEffect(() => {
+    if (currentStatus === 'DONE' && videoId) {
+      // Keep data for 5 minutes after completion for review, then clean up
+      const timeout = setTimeout(() => clearTimingState(videoId), 5 * 60 * 1000);
+      return () => clearTimeout(timeout);
+    }
+  }, [currentStatus, videoId]);
+
   const uploadStep = { key: 'uploaded', label: window.__t('statusUploaded') || 'アップロード完了' };
 
-  // Analysis steps are shown in a 5-row window while upload step stays fixed above.
   const analysisSteps = [
     { key: 'STEP_COMPRESS_1080P', label: window.__t('statusCompress') || '動画圧縮中...' },
     { key: 'STEP_0_EXTRACT_FRAMES', label: window.__t('statusStep0') || 'フレーム抽出中...' },
@@ -384,7 +575,6 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
     return 'completed';
   };
 
-  // Get analysis step status: 'completed', 'current', 'pending', or 'error'
   const getAnalysisStepStatus = (stepKey) => {
     if (currentStatus === 'ERROR') return 'error';
     if (currentStatus === 'NEW' || currentStatus === 'UPLOADING') {
@@ -400,7 +590,6 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
     return 'pending';
   };
 
-  // Render step icon based on status
   const renderStepIcon = (status) => {
     if (status === 'completed') {
       return (
@@ -464,17 +653,15 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
     );
   };
 
-  // Get visible analysis steps window (max 5 steps, current step in middle)
+  // Get visible analysis steps window
   const { visibleAnalysisSteps, isAnalysisFirst, isAnalysisLast, currentAnalysisIndex } = useMemo(() => {
     const totalSteps = analysisSteps.length;
     const foundIndex = analysisSteps.findIndex(s => s.key === currentStatus);
     const currentIndex = foundIndex >= 0 ? foundIndex : 0;
 
-    // Always show 5 steps or less if near boundaries
-    let startIndex = Math.max(0, currentIndex - 2); // Current step in middle (index 2)
+    let startIndex = Math.max(0, currentIndex - 2);
     let endIndex = Math.min(totalSteps, startIndex + 5);
 
-    // Adjust if we're near the end
     if (endIndex - startIndex < 5) {
       startIndex = Math.max(0, endIndex - 5);
     }
@@ -488,6 +675,7 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
   }, [currentStatus]);
 
   const isError = currentStatus === 'ERROR';
+  const isDone = currentStatus === 'DONE';
   const uploadStepStatus = getUploadStepStatus();
   const currentAnalysisLabel = visibleAnalysisSteps.find(
     (step) => getAnalysisStepStatus(step.key) === 'current',
@@ -507,6 +695,10 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
       </div>
     );
   }, [videoTitle]);
+
+  // ── Determine if we should show timing info ──
+  const showTiming = elapsedMs > 0 && currentStatus !== 'NEW' && currentStatus !== 'UPLOADING';
+  const showRemaining = estimatedRemainingMs !== null && estimatedRemainingMs > 0 && smoothProgress >= 3 && !isDone;
 
   return (
     <div className="w-full">
@@ -550,6 +742,7 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
             ? Math.abs(stepGlobalIndex - currentAnalysisIndex)
             : 0;
           const transitionDelay = `${Math.min(distanceFromCurrent, 4) * 45}ms`;
+          const phaseDur = phaseDurations[step.key];
 
           return (
             <div
@@ -570,6 +763,10 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
                 {step.label}
                 {isActive && stepProgress > 0 && stepProgress < 100 && (
                   <span className="ml-2 text-xs text-indigo-500 font-semibold">{stepProgress}%</span>
+                )}
+                {/* Show phase duration for completed steps */}
+                {isCompleted && phaseDur && phaseDur > 1000 && (
+                  <span className="ml-2 text-[11px] text-gray-400 font-normal">{formatDuration(phaseDur)}</span>
                 )}
               </span>
             </div>
@@ -598,8 +795,8 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
               style={{ width: `${smoothProgress}%` }}
             />
           </div>
-          {/* Current status message */}
-          <div className="flex items-center justify-between mb-3 mt-2">
+          {/* Current status + progress + timing */}
+          <div className="flex items-center justify-between mb-1 mt-2">
             <span className="text-sm text-gray-600">
               {progressLabel}
             </span>
@@ -607,6 +804,29 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
               {Math.round(smoothProgress)}%
             </span>
           </div>
+
+          {/* ── Elapsed & Remaining time display ── */}
+          {showTiming && (
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs text-gray-400 flex items-center gap-1">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                {formatDuration(elapsedMs)} 経過
+                {showRemaining && (
+                  <span className="text-gray-300 mx-1">/</span>
+                )}
+                {showRemaining && (
+                  <span>残り 約{formatDuration(estimatedRemainingMs)}</span>
+                )}
+              </span>
+              {isDone && (
+                <span className="text-xs text-green-500 font-medium">
+                  合計 {formatDuration(elapsedMs)}
+                </span>
+              )}
+            </div>
+          )}
+
+          {!showTiming && <div className="mb-3" />}
 
           <p className="text-sm text-gray-400 mt-5 text-center">
             {window.__t('progressCompleteMessage') || '解析が完了すると、自動的に結果が表示されます。'}
