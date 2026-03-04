@@ -162,7 +162,8 @@ def process_job(payload: dict, msg_id: str, pop_receipt: str):
 
         return success
     except Exception as e:
-        log_error_type(job_id, job_type, "UNKNOWN", str(e))
+        exc_name = type(e).__name__
+        log_error_type(job_id, job_type, "UNKNOWN", f"EXC={exc_name} {e}")
         return False
     finally:
         with active_jobs_lock:
