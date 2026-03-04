@@ -614,6 +614,12 @@ async def stream_video_status(
                             "updated_at": video.updated_at.isoformat() if video.updated_at else None,
                             "created_at": video.created_at.isoformat() if video.created_at else None,
                             "server_now": datetime.utcnow().isoformat(),
+                            # Enqueue & worker evidence
+                            "enqueue_status": getattr(video, 'enqueue_status', None),
+                            "queue_enqueued_at": video.queue_enqueued_at.isoformat() if getattr(video, 'queue_enqueued_at', None) else None,
+                            "enqueue_error": getattr(video, 'enqueue_error', None),
+                            "worker_claimed_at": video.worker_claimed_at.isoformat() if getattr(video, 'worker_claimed_at', None) else None,
+                            "dequeue_count": getattr(video, 'dequeue_count', None),
                         }
 
                         yield f"data: {json.dumps(payload)}\n\n"

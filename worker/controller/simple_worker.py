@@ -8,6 +8,7 @@ import time
 import subprocess
 import fcntl
 import signal
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -47,6 +48,9 @@ live_monitor_lock = Lock()
 
 # Graceful shutdown flag
 shutdown_requested = False
+
+# Worker instance identifier for tracing
+WORKER_INSTANCE_ID = f"{socket.gethostname()}-{os.getpid()}"
 
 # --- Poison job log (DLQ) ---
 POISON_LOG = Path(__file__).parent.parent / "poison_jobs.jsonl"
@@ -506,6 +510,18 @@ def poll_and_process(executor: ThreadPoolExecutor):
 
             print(f"[worker] Received job: type={job_type}, id={job_id} (active: {get_active_count()}/{MAX_WORKERS})")
 
+            # --- Improvement 2: Record worker_claimed evidence to DB ---
+            if job_type in ("video_analysis", None) and job_id != "unknown":
+                try:
+                    from db_ops import init_db_sync, update_worker_claimed_sync, close_db_sync
+                    init_db_sync()
+                    dq_count = getattr(msg, 'dequeue_count', None) or 0
+                    update_worker_claimed_sync(job_id, WORKER_INSTANCE_ID, dq_count)
+                    close_db_sync()
+                    print(f"[worker] Claimed video {job_id} (instance={WORKER_INSTANCE_ID}, dequeue={dq_count})")
+                except Exception as claim_err:
+                    print(f"[worker] Failed to record worker_claimed: {claim_err}")
+
             # Submit job to thread pool
             future = executor.submit(process_job, payload, msg.id, msg.pop_receipt)
             with active_jobs_lock:
@@ -578,8 +594,21 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
+    # --- Improvement: Log queue connection details for debugging ENV mismatches ---
+    conn_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING', '')
+    storage_account = 'UNKNOWN'
+    for part in conn_str.split(';'):
+        if part.startswith('AccountName='):
+            storage_account = part.split('=', 1)[1]
+            break
+    queue_name = os.getenv('AZURE_QUEUE_NAME', 'video-jobs')
+    env_label = os.getenv('ENVIRONMENT', 'unknown')
+
     print(f"[worker] Starting simple queue worker (max_concurrent={MAX_WORKERS})...")
-    print(f"[worker] Queue: {os.getenv('AZURE_QUEUE_NAME', 'video-jobs')}")
+    print(f"[worker] Instance: {WORKER_INSTANCE_ID}")
+    print(f"[worker] Storage account: {storage_account}")
+    print(f"[worker] Queue: {queue_name}")
+    print(f"[worker] Environment: {env_label}")
     print(f"[worker] Visibility timeout: {VISIBILITY_TIMEOUT}s ({VISIBILITY_TIMEOUT // 60}min, renewed every {VISIBILITY_RENEW_INTERVAL // 60}min)")
     print(f"[worker] Video process timeout: {VIDEO_PROCESS_TIMEOUT}s ({VIDEO_PROCESS_TIMEOUT // 60}min)")
     print(f"[worker] Max retries (dequeue count): {MAX_DEQUEUE_COUNT}")

@@ -50,6 +50,11 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
   const [errorMessage, setErrorMessage] = useState(null);
   const [_usePolling, setUsePolling] = useState(false);
 
+  // Enqueue & worker evidence state
+  const [enqueueStatus, setEnqueueStatus] = useState(null);
+  const [workerClaimedAt, setWorkerClaimedAt] = useState(null);
+  const [enqueueError, setEnqueueError] = useState(null);
+
   // ── Timing state ──
   const [elapsedMs, setElapsedMs] = useState(0);
   const [estimatedRemainingMs, setEstimatedRemainingMs] = useState(null);
@@ -436,6 +441,11 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
         setErrorMessage(null);
         retryCountRef.current = 0;
 
+        // Track enqueue & worker evidence
+        if (data.enqueue_status !== undefined) setEnqueueStatus(data.enqueue_status);
+        if (data.worker_claimed_at !== undefined) setWorkerClaimedAt(data.worker_claimed_at);
+        if (data.enqueue_error !== undefined) setEnqueueError(data.enqueue_error);
+
         const serverStepProgress = typeof data.step_progress === 'number' ? data.step_progress : 0;
         setStepProgress(serverStepProgress);
 
@@ -547,6 +557,17 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
   }, [currentStatus, videoId]);
 
   const uploadStep = { key: 'uploaded', label: window.__t('statusUploaded') || 'アップロード完了' };
+
+  // Derive queue/worker status label for display between upload and compress
+  const getQueueStatusLabel = () => {
+    if (enqueueError) return `キュー投入失敗: ${enqueueError}`;
+    if (!enqueueStatus) return 'キュー投入中...';
+    if (enqueueStatus === 'FAILED') return 'キュー投入失敗';
+    if (!workerClaimedAt) return 'キュー待ち（ワーカー未受信）';
+    return 'ワーカー受信済み';
+  };
+
+  const queueStep = { key: 'QUEUE_WAITING', label: getQueueStatusLabel() };
 
   const analysisSteps = [
     { key: 'STEP_COMPRESS_1080P', label: window.__t('statusCompress') || '動画圧縮中...' },
@@ -713,6 +734,28 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
             {uploadStep.label}
           </span>
         </div>
+
+        {/* Queue / Worker status step (between upload and analysis) */}
+        {uploadStepStatus === 'completed' && currentStatus !== 'DONE' && currentStatus !== 'ERROR' && (
+          <div className="flex items-center gap-3 transition-all duration-500 ease-out">
+            {workerClaimedAt ? (
+              renderStepIcon('completed')
+            ) : enqueueStatus === 'FAILED' ? (
+              renderStepIcon('error')
+            ) : enqueueStatus === 'OK' ? (
+              renderStepIcon('current')
+            ) : (
+              renderStepIcon('current')
+            )}
+            <span className={`text-sm transition-all duration-500 ease-out ${
+              enqueueStatus === 'FAILED' ? 'text-red-500 font-medium' :
+              workerClaimedAt ? 'text-green-600' :
+              'text-gray-800 font-medium'
+            }`}>
+              {queueStep.label}
+            </span>
+          </div>
+        )}
 
         <div className="pt-1 pb-1 text-left">
           <p className="text-[11px] text-gray-400">

@@ -4,10 +4,11 @@ from app.services.queue_service import enqueue_job
 from app.core.container import Container
 from app.models.orm.upload import Upload
 from app.models.orm.user import User
+from app.models.orm.video import Video
 from datetime import datetime, timedelta
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 import os
 import asyncio
 import uuid as uuid_module
@@ -181,7 +182,38 @@ class VideoService:
                     _logger.warning(f"Failed to generate trend Excel download URL: {e}")
 
         # 4) Enqueue a message so worker can start processing
-        await enqueue_job(queue_payload)
+        #    Save enqueue evidence to DB regardless of success/failure
+        enqueue_result = await enqueue_job(queue_payload)
+
+        try:
+            vid_uuid = uuid_module.UUID(str(video.id))
+            if enqueue_result.success:
+                await db.execute(
+                    update(Video).where(Video.id == vid_uuid).values(
+                        enqueue_status="OK",
+                        queue_message_id=enqueue_result.message_id,
+                        queue_enqueued_at=enqueue_result.enqueued_at,
+                        enqueue_error=None,
+                    )
+                )
+                _logger.info(f"[enqueue] OK video={video.id} msg_id={enqueue_result.message_id}")
+            else:
+                await db.execute(
+                    update(Video).where(Video.id == vid_uuid).values(
+                        enqueue_status="FAILED",
+                        queue_message_id=None,
+                        queue_enqueued_at=None,
+                        enqueue_error=enqueue_result.error,
+                    )
+                )
+                _logger.error(f"[enqueue] FAILED video={video.id} error={enqueue_result.error}")
+            await db.commit()
+        except Exception as db_err:
+            _logger.error(f"[enqueue] Failed to save enqueue evidence: {db_err}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
         # Remove upload session record if present
         if upload_id:
@@ -219,5 +251,7 @@ class VideoService:
         return {
             "video_id": str(video.id),
             "status": video.status,
-            "message": "Video upload completed; queued for analysis",
+            "enqueue_status": enqueue_result.success and "OK" or "FAILED",
+            "message": "Video upload completed; queued for analysis" if enqueue_result.success
+                       else f"Video saved but enqueue failed: {enqueue_result.error}",
         }

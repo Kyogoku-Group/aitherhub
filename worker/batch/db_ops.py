@@ -1780,3 +1780,33 @@ async def get_product_exposures(video_id: str):
 def get_product_exposures_sync(video_id: str):
     loop = get_event_loop()
     return loop.run_until_complete(get_product_exposures(video_id))
+
+
+# ---------- worker claimed evidence (Improvement 2) ----------
+async def update_worker_claimed(video_id: str, instance_id: str, dequeue_count: int):
+    """Record that the worker has claimed this job.
+
+    Written at the moment the worker dequeues the message, before any
+    processing begins.  This lets the UI show 'ワーカー受信' instead of
+    the ambiguous 'キュー待ち' state.
+    """
+    sql = text("""
+        UPDATE videos
+        SET worker_claimed_at = now(),
+            worker_instance_id = :instance_id,
+            dequeue_count = :dequeue_count,
+            updated_at = now()
+        WHERE id = :video_id
+    """)
+    async with AsyncSessionLocal() as session:
+        await session.execute(sql, {
+            "video_id": video_id,
+            "instance_id": instance_id,
+            "dequeue_count": dequeue_count,
+        })
+        await session.commit()
+
+
+def update_worker_claimed_sync(video_id: str, instance_id: str, dequeue_count: int):
+    loop = get_event_loop()
+    return loop.run_until_complete(update_worker_claimed(video_id, instance_id, dequeue_count))

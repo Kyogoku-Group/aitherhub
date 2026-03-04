@@ -1,7 +1,9 @@
 import json
 import os
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict
+from dataclasses import dataclass
 
 from azure.storage.queue import QueueClient
 
@@ -10,6 +12,15 @@ if not logger.handlers:
     # Fallback basic config so logs appear in stdout if app didn't configure logging
     logging.basicConfig(level=logging.INFO)
 logger.setLevel(logging.INFO)
+
+
+@dataclass
+class EnqueueResult:
+    """Result of enqueue operation with evidence for DB persistence."""
+    success: bool
+    message_id: str | None = None
+    enqueued_at: datetime | None = None
+    error: str | None = None
 
 
 def _get_queue_client() -> QueueClient:
@@ -34,19 +45,32 @@ def _get_queue_client() -> QueueClient:
     return client
 
 
-async def enqueue_job(payload: Dict[str, Any]) -> None:
+async def enqueue_job(payload: Dict[str, Any]) -> EnqueueResult:
     """Push a job message to Azure Storage Queue.
 
-    payload example:
-    {
-      "job_id": "uuid",
-      "video_id": "uuid",
-      "blob_url": "http://...",
-      "original_filename": "file.mp4"
-    }
+    Returns EnqueueResult with message_id and enqueued_at on success,
+    or error details on failure. Never raises — caller checks result.success.
     """
-    client = _get_queue_client()
-    message = json.dumps(payload, ensure_ascii=False)
-    logger.info(f"[queue] enqueue len={len(message)} payload_keys={list(payload.keys())}")
-    client.send_message(message)
-    return None
+    try:
+        client = _get_queue_client()
+        message = json.dumps(payload, ensure_ascii=False)
+        logger.info(f"[queue] enqueue len={len(message)} payload_keys={list(payload.keys())}")
+        resp = client.send_message(message)
+
+        # Extract evidence from Azure response
+        message_id = resp.get("id") if isinstance(resp, dict) else getattr(resp, "id", None)
+        inserted_on = resp.get("inserted_on") if isinstance(resp, dict) else getattr(resp, "inserted_on", None)
+        enqueued_at = inserted_on if inserted_on else datetime.now(timezone.utc)
+
+        logger.info(f"[queue] enqueue OK message_id={message_id} enqueued_at={enqueued_at}")
+        return EnqueueResult(
+            success=True,
+            message_id=str(message_id) if message_id else None,
+            enqueued_at=enqueued_at,
+        )
+    except Exception as e:
+        logger.error(f"[queue] enqueue FAILED: {e}")
+        return EnqueueResult(
+            success=False,
+            error=str(e),
+        )
