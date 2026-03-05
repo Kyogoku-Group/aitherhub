@@ -1587,6 +1587,7 @@ async def rate_phase(
         user_id = user.get("user_id") or user.get("id")
         rating = request_body.get("rating")
         comment = request_body.get("comment", "")
+        reviewer_name = request_body.get("reviewer_name", "")
 
         if rating is None or not isinstance(rating, int) or rating < 1 or rating > 5:
             raise HTTPException(status_code=400, detail="rating must be an integer between 1 and 5")
@@ -1610,6 +1611,7 @@ async def rate_phase(
                 SET user_rating = :rating,
                     user_comment = :comment,
                     importance_score = :importance_score,
+                    reviewer_name = :reviewer_name,
                     rated_at = NOW(),
                     updated_at = NOW()
                 WHERE video_id = :video_id AND phase_index = :phase_index
@@ -1618,6 +1620,7 @@ async def rate_phase(
                 "rating": rating,
                 "comment": comment,
                 "importance_score": importance_score,
+                "reviewer_name": reviewer_name or None,
                 "video_id": video_id,
                 "phase_index": phase_index,
             })
@@ -1670,6 +1673,7 @@ async def rate_phase(
             "rating": rating,
             "comment": comment,
             "importance_score": importance_score,
+            "reviewer_name": reviewer_name,
         }
 
     except HTTPException:
@@ -1712,6 +1716,7 @@ async def update_human_sales_tags(
     try:
         user_id = user.get("user_id") or user.get("id")
         tags = request_body.get("human_sales_tags")
+        reviewer_name = request_body.get("reviewer_name", "")
 
         if tags is None or not isinstance(tags, list):
             raise HTTPException(status_code=400, detail="human_sales_tags must be a list of tag strings")
@@ -1734,11 +1739,13 @@ async def update_human_sales_tags(
         sql_update = text("""
             UPDATE video_phases
             SET human_sales_tags = :tags,
+                reviewer_name = COALESCE(:reviewer_name, reviewer_name),
                 updated_at = NOW()
             WHERE video_id = :video_id AND phase_index = :phase_index
         """)
         result = await db.execute(sql_update, {
             "tags": tags_json,
+            "reviewer_name": reviewer_name or None,
             "video_id": video_id,
             "phase_index": phase_index,
         })

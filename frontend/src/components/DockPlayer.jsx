@@ -136,6 +136,11 @@ export default function DockPlayer({
   // Debounce timer for auto-save
   const saveTimerRef = useRef({});
 
+  // ── Reviewer name (stored in localStorage per browser) ──────
+  const [reviewerName, setReviewerName] = useState(() => localStorage.getItem('aitherhub_reviewer_name') || '');
+  const [isEditingReviewer, setIsEditingReviewer] = useState(false);
+  const [reviewerInput, setReviewerInput] = useState('');
+
   // ── Find current phase based on video currentTime ─────────
   const findPhaseIndex = useCallback(
     (time) => {
@@ -650,6 +655,59 @@ export default function DockPlayer({
                   改善提案
                 </div>
                 <p className="text-sm text-white/65 leading-relaxed">{currentPhase.insight}</p>
+              </div>
+            )}
+
+            {/* ── Reviewer Name ─────────────────────────────── */}
+            {phaseKey >= 0 && (
+              <div className="rounded-xl bg-white/5 border border-white/10 p-3">
+                <div className="flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white/40 flex-shrink-0">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" />
+                  </svg>
+                  {!reviewerName || isEditingReviewer ? (
+                    <div className="flex items-center gap-1.5 flex-1">
+                      <input
+                        type="text"
+                        value={reviewerInput}
+                        onChange={(e) => setReviewerInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && reviewerInput.trim()) {
+                            localStorage.setItem('aitherhub_reviewer_name', reviewerInput.trim());
+                            setReviewerName(reviewerInput.trim());
+                            setIsEditingReviewer(false);
+                          }
+                        }}
+                        placeholder="あなたの名前を入力"
+                        autoFocus
+                        className="flex-1 bg-white/5 border border-white/15 rounded-lg px-2.5 py-1.5 text-xs text-white/80 placeholder-white/25 focus:outline-none focus:border-white/30 focus:ring-1 focus:ring-white/20"
+                      />
+                      <button
+                        onClick={() => {
+                          if (reviewerInput.trim()) {
+                            localStorage.setItem('aitherhub_reviewer_name', reviewerInput.trim());
+                            setReviewerName(reviewerInput.trim());
+                            setIsEditingReviewer(false);
+                          }
+                        }}
+                        disabled={!reviewerInput.trim()}
+                        className="px-2.5 py-1.5 rounded-lg text-[10px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 transition-colors disabled:opacity-30"
+                      >
+                        決定
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 flex-1">
+                      <span className="text-xs text-white/70 font-medium">{reviewerName}</span>
+                      <button
+                        onClick={() => { setReviewerInput(reviewerName); setIsEditingReviewer(true); }}
+                        className="text-[10px] text-white/25 hover:text-white/50 transition-colors"
+                      >
+                        変更
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 

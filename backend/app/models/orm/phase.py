@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Text, Integer, Float, DateTime
+from sqlalchemy import ForeignKey, Text, Integer, Float, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.orm.base import Base, UUIDMixin, TimestampMixin
@@ -31,5 +31,6 @@ class Phase(Base, UUIDMixin, TimestampMixin):
     
     sales_psychology_tags: Mapped[str | None] = mapped_column(Text, nullable=True)
     human_sales_tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewer_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

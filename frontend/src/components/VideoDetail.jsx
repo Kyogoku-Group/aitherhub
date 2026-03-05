@@ -183,9 +183,12 @@ export default function VideoDetail({ videoData }) {
     setTimeout(() => setToast(null), 2000);
   };
 
+  const getReviewerName = () => localStorage.getItem('aitherhub_reviewer_name') || '';
+
   const handleRatePhase = (phaseIndex, rating) => {
     if (!videoData?.id) return;
     const comment = ratingComments[phaseIndex] || '';
+    const reviewerName = getReviewerName();
     // Optimistic update: immediately reflect in UI
     setPhaseRatings(prev => ({
       ...prev,
@@ -193,7 +196,7 @@ export default function VideoDetail({ videoData }) {
     }));
     showToast(`★${rating} 保存されました`);
     // Fire-and-forget: save in background
-    VideoService.ratePhase(videoData.id, phaseIndex, rating, comment)
+    VideoService.ratePhase(videoData.id, phaseIndex, rating, comment, reviewerName)
       .catch(err => {
         console.error('Failed to rate phase:', err);
         showToast('保存に失敗しました', 'error');
@@ -217,7 +220,7 @@ export default function VideoDetail({ videoData }) {
     }));
     showToast('コメント保存されました');
     // Fire-and-forget: save in background
-    VideoService.ratePhase(videoData.id, phaseIndex, currentRating, comment)
+    VideoService.ratePhase(videoData.id, phaseIndex, currentRating, comment, getReviewerName())
       .catch(err => {
         console.error('Failed to save comment:', err);
         showToast('保存に失敗しました', 'error');
@@ -278,7 +281,7 @@ export default function VideoDetail({ videoData }) {
     setHumanTags(prev => ({ ...prev, [phaseIndex]: [...tags] }));
     setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: true, saved: false } }));
     showToast('タグ確認済み');
-    VideoService.updateHumanSalesTags(videoData.id, phaseIndex, tags)
+    VideoService.updateHumanSalesTags(videoData.id, phaseIndex, tags, getReviewerName())
       .then(() => {
         setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: false, saved: true } }));
       })
@@ -293,7 +296,7 @@ export default function VideoDetail({ videoData }) {
     const tags = humanTags[phaseIndex] || [];
     setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: true, saved: false } }));
     showToast('タグ保存中...');
-    VideoService.updateHumanSalesTags(videoData.id, phaseIndex, tags)
+    VideoService.updateHumanSalesTags(videoData.id, phaseIndex, tags, getReviewerName())
       .then(() => {
         setTagEditState(prev => ({ ...prev, [phaseIndex]: { editing: false, saving: false, saved: true } }));
         showToast('タグ保存済み');

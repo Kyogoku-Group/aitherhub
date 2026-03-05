@@ -533,12 +533,11 @@ class VideoService extends BaseApiService {
    * @param {string} [comment] - optional feedback comment
    * @returns {Promise<Object>}
    */
-  async ratePhase(videoId, phaseIndex, rating, comment = '') {
+  async ratePhase(videoId, phaseIndex, rating, comment = '', reviewerName = '') {
     try {
-      const response = await this.put(`/api/v1/videos/${videoId}/phases/${phaseIndex}/rating`, {
-        rating,
-        comment,
-      });
+      const body = { rating, comment };
+      if (reviewerName) body.reviewer_name = reviewerName;
+      const response = await this.put(`/api/v1/videos/${videoId}/phases/${phaseIndex}/rating`, body);
       return response;
     } catch (error) {
       console.warn('Failed to rate phase:', error);
@@ -550,11 +549,11 @@ class VideoService extends BaseApiService {
   // Human Sales Tags API (Human-in-the-loop)
   // =========================================================
 
-  async updateHumanSalesTags(videoId, phaseIndex, tags) {
+  async updateHumanSalesTags(videoId, phaseIndex, tags, reviewerName = '') {
     try {
-      const response = await this.patch(`/api/v1/videos/${videoId}/phases/${phaseIndex}/tags`, {
-        human_sales_tags: tags,
-      });
+      const body = { human_sales_tags: tags };
+      if (reviewerName) body.reviewer_name = reviewerName;
+      const response = await this.patch(`/api/v1/videos/${videoId}/phases/${phaseIndex}/tags`, body);
       return response;
     } catch (error) {
       console.warn('Failed to update human sales tags:', error);
