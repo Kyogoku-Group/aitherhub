@@ -2,6 +2,7 @@
 backfill_sales_moments.py  –  既存動画のsales_momentsをDBに投入
 ==================================================================
 Worker VM上で直接実行する。
+全てasync関数を使い、イベントループ競合を回避。
 
 使い方:
   python backfill_sales_moments.py                    # 全動画
@@ -28,8 +29,8 @@ from sqlalchemy import text as sa_text
 
 from csv_slot_filter import detect_sales_moments
 from db_ops import (
-    ensure_sales_moments_table_sync,
-    bulk_insert_sales_moments_sync,
+    ensure_sales_moments_table,      # async version
+    bulk_insert_sales_moments,        # async version
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -53,17 +54,44 @@ def parse_trend_excel_safe(file_path: str):
 async def backfill_all(video_id: str = None, limit: int = None):
     """Backfill sales_moments for existing videos."""
 
-    # Ensure table exists (no arguments - uses internal DB connection)
+    # Ensure table exists (async version)
     try:
-        ensure_sales_moments_table_sync()
+        await ensure_sales_moments_table()
         print("[backfill] video_sales_moments table ensured.")
     except Exception as e:
-        print(f"[backfill] Table creation error (may already exist): {e}")
+        print(f"[backfill] Table creation note: {e}")
 
     async with AsyncSessionLocal() as session:
-        # Get videos with excel_trend_blob_url
-        sql = """
-            SELECT id, original_filename, excel_trend_blob_url, time_offset_seconds
+        # First, check what columns exist
+        try:
+            col_check = await session.execute(sa_text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'videos' ORDER BY ordinal_position"
+            ))
+            cols = [r[0] for r in col_check.fetchall()]
+            print(f"[backfill] videos columns: {cols[:20]}...")
+        except Exception as e:
+            print(f"[backfill] Column check failed: {e}")
+            cols = []
+
+        # Determine correct column names
+        name_col = "original_filename" if "original_filename" in cols else "filename"
+        has_trend_url = "excel_trend_blob_url" in cols
+        has_time_offset = "time_offset_seconds" in cols
+
+        if not has_trend_url:
+            print("[backfill] ERROR: excel_trend_blob_url column not found in videos table.")
+            print(f"[backfill] Available columns: {cols}")
+            return
+
+        # Build SQL dynamically
+        select_cols = f"id, {name_col}"
+        select_cols += ", excel_trend_blob_url"
+        if has_time_offset:
+            select_cols += ", time_offset_seconds"
+
+        sql = f"""
+            SELECT {select_cols}
             FROM videos
             WHERE status = 'completed'
               AND excel_trend_blob_url IS NOT NULL
@@ -75,25 +103,39 @@ async def backfill_all(video_id: str = None, limit: int = None):
         if limit:
             sql += f" LIMIT {limit}"
 
+        print(f"[backfill] SQL: {sql[:200]}...")
         result = await session.execute(sa_text(sql))
         videos = result.fetchall()
         print(f"[backfill] Found {len(videos)} videos with trend data.")
+
+        if len(videos) == 0:
+            # Debug: check total videos and their trend URLs
+            debug_sql = sa_text(
+                "SELECT id, status, excel_trend_blob_url IS NOT NULL as has_trend "
+                "FROM videos ORDER BY created_at DESC LIMIT 10"
+            )
+            debug_result = await session.execute(debug_sql)
+            for r in debug_result.fetchall():
+                print(f"  DEBUG: {r.id} status={r.status} has_trend={r.has_trend}")
+            return
 
         success_count = 0
         skip_count = 0
         error_count = 0
 
         for v in videos:
-            vid = str(v.id)
-            filename = v.original_filename or "unknown"
-            excel_url = v.excel_trend_blob_url
-            time_offset = float(v.time_offset_seconds) if v.time_offset_seconds else 0.0
+            vid = str(v[0])
+            filename = str(v[1]) if v[1] else "unknown"
+            excel_url = v[2]
+            time_offset = float(v[3]) if has_time_offset and len(v) > 3 and v[3] else 0.0
 
             print(f"\n[{vid[:8]}] {filename}")
 
             # Check if already has sales_moments
             try:
-                check_sql = sa_text("SELECT COUNT(*) FROM video_sales_moments WHERE video_id = :vid")
+                check_sql = sa_text(
+                    "SELECT COUNT(*) FROM video_sales_moments WHERE video_id = :vid"
+                )
                 check_result = await session.execute(check_sql, {"vid": vid})
                 existing_count = check_result.scalar()
                 if existing_count and existing_count > 0:
@@ -101,13 +143,13 @@ async def backfill_all(video_id: str = None, limit: int = None):
                     skip_count += 1
                     continue
             except Exception:
-                pass  # Table might not exist yet, continue
+                pass  # Table might not exist yet
 
             # Download Excel
             try:
                 resp = http_requests.get(excel_url, timeout=30)
                 if resp.status_code != 200:
-                    print(f"  [ERROR] Failed to download Excel: HTTP {resp.status_code}")
+                    print(f"  [ERROR] Download failed: HTTP {resp.status_code}")
                     error_count += 1
                     continue
             except Exception as e:
@@ -127,7 +169,7 @@ async def backfill_all(video_id: str = None, limit: int = None):
                     skip_count += 1
                     continue
 
-                print(f"  Trend data: {len(trend_data)} rows")
+                print(f"  Trend data: {len(trend_data)} rows, cols: {list(trend_data.columns)[:5]}")
 
                 # Detect sales moments
                 moments = detect_sales_moments(
@@ -142,8 +184,8 @@ async def backfill_all(video_id: str = None, limit: int = None):
 
                 print(f"  Detected {len(moments)} moments")
 
-                # Save to DB (no conn argument - uses internal DB connection)
-                bulk_insert_sales_moments_sync(vid, moments)
+                # Save to DB (async version)
+                await bulk_insert_sales_moments(vid, moments)
                 print(f"  ✅ Saved {len(moments)} moments to DB")
                 success_count += 1
 
@@ -156,7 +198,7 @@ async def backfill_all(video_id: str = None, limit: int = None):
 
         print(f"\n{'='*60}")
         print(f"[backfill] DONE: success={success_count}, skip={skip_count}, error={error_count}")
-        print(f"[backfill] Total videos processed: {len(videos)}")
+        print(f"[backfill] Total videos: {len(videos)}")
 
 
 def main():
