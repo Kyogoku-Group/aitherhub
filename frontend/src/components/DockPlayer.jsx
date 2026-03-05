@@ -636,15 +636,16 @@ export default function DockPlayer({
                       CTA {ctaScore}
                     </span>
                   )}
-                  {/* AI Score Badge */}
+                  {/* AI Score Badge - 3 scores */}
                   {(() => {
                     const scoreData = eventScores.find(s => s.phase_index === currentPhase?.phase_index);
-                    if (!scoreData || scoreData.ai_score == null) return null;
-                    const score = scoreData.ai_score;
+                    if (!scoreData) return null;
+                    const combined = scoreData.score_combined ?? scoreData.ai_score;
+                    if (combined == null) return null;
                     const rank = scoreData.rank;
-                    const pct = Math.round(score * 100);
-                    const isHot = score >= 0.7;
-                    const isWarm = score >= 0.4;
+                    const pct = Math.round(combined * 100);
+                    const isHot = combined >= 0.7;
+                    const isWarm = combined >= 0.4;
                     return (
                       <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold border ${
                         isHot ? "bg-gradient-to-r from-red-500/20 to-orange-500/20 text-orange-200 border-orange-500/40 animate-pulse"
@@ -798,13 +799,19 @@ export default function DockPlayer({
             {/* ── AI Sell Score Detail ─────────────────────── */}
             {(() => {
               const scoreData = eventScores.find(s => s.phase_index === currentPhase?.phase_index);
-              if (!scoreData || scoreData.ai_score == null) return null;
-              const score = scoreData.ai_score;
+              if (!scoreData) return null;
+              const combined = scoreData.score_combined ?? scoreData.ai_score;
+              if (combined == null) return null;
+              const clickScore = scoreData.score_click;
+              const orderScore = scoreData.score_order;
               const rank = scoreData.rank;
               const total = eventScores.length;
-              const pct = Math.round(score * 100);
-              const isHot = score >= 0.7;
-              const barColor = isHot ? 'bg-gradient-to-r from-orange-500 to-red-500' : score >= 0.4 ? 'bg-amber-500' : 'bg-gray-500';
+              const pct = Math.round(combined * 100);
+              const isHot = combined >= 0.7;
+              const barColor = isHot ? 'bg-gradient-to-r from-orange-500 to-red-500' : combined >= 0.4 ? 'bg-amber-500' : 'bg-gray-500';
+              const reasons = scoreData.reasons || [];
+              const modelVersion = scoreData.model_version;
+              const scoreSource = scoreData.score_source;
               return (
                 <div className={`rounded-xl p-4 border ${
                   isHot ? 'bg-gradient-to-br from-red-500/10 to-orange-500/10 border-orange-500/25' : 'bg-white/5 border-white/10'
@@ -814,11 +821,15 @@ export default function DockPlayer({
                       <path d="M12 2L15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2z" />
                     </svg>
                     AI売れやすさスコア
-                    <span className="ml-auto text-[10px] text-white/25">{scoreData.score_source === 'model' ? 'ML Model' : 'Heuristic'}</span>
+                    <span className="ml-auto text-[10px] text-white/25">
+                      {scoreSource === 'model' ? 'ML Model' : 'Heuristic'}
+                      {modelVersion && ` ${modelVersion}`}
+                    </span>
                   </div>
-                  <div className="flex items-center gap-3 mb-2">
+                  {/* Combined Score */}
+                  <div className="flex items-center gap-3 mb-3">
                     <div className={`text-2xl font-black ${
-                      isHot ? 'text-orange-300' : score >= 0.4 ? 'text-amber-300' : 'text-gray-400'
+                      isHot ? 'text-orange-300' : combined >= 0.4 ? 'text-amber-300' : 'text-gray-400'
                     }`}>
                       {pct}%
                     </div>
@@ -828,6 +839,44 @@ export default function DockPlayer({
                       </div>
                     </div>
                   </div>
+                  {/* Click / Order sub-scores */}
+                  {(clickScore != null || orderScore != null) && (
+                    <div className="grid grid-cols-2 gap-2 mb-3">
+                      {clickScore != null && (
+                        <div className="bg-white/5 rounded-lg p-2">
+                          <div className="text-[9px] text-blue-400/60 mb-0.5">Click興味</div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-sm font-bold text-blue-300">{Math.round(clickScore * 100)}%</span>
+                            <div className="flex-1 h-1 rounded-full bg-white/10 overflow-hidden">
+                              <div className="h-full rounded-full bg-blue-500 transition-all duration-500" style={{ width: `${Math.round(clickScore * 100)}%` }} />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {orderScore != null && (
+                        <div className="bg-white/5 rounded-lg p-2">
+                          <div className="text-[9px] text-green-400/60 mb-0.5">Order決断</div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-sm font-bold text-green-300">{Math.round(orderScore * 100)}%</span>
+                            <div className="flex-1 h-1 rounded-full bg-white/10 overflow-hidden">
+                              <div className="h-full rounded-full bg-green-500 transition-all duration-500" style={{ width: `${Math.round(orderScore * 100)}%` }} />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Reasons */}
+                  {reasons.length > 0 && (
+                    <div className="space-y-1 mb-2">
+                      {reasons.slice(0, 3).map((reason, i) => (
+                        <div key={i} className="flex items-start gap-1.5 text-[10px] text-white/50">
+                          <span className="text-yellow-500/70 mt-0.5">{'\u2022'}</span>
+                          <span>{reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex items-center justify-between text-[10px] text-white/35">
                     <span>ランク: {rank} / {total}フェーズ</span>
                     {isHot && <span className="text-orange-400 font-semibold">売れやすい瞬間</span>}

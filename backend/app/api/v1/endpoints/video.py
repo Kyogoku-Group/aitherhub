@@ -2617,23 +2617,13 @@ async def get_event_scores(
 ):
     """
     各フェーズの「売れやすさスコア」を返す。
+    Click / Order / Combined の3スコア + model_version。
     
     学習済みモデルがある場合: モデルで推論
     モデルがない場合: ルールベースのヒューリスティックスコア
-    
-    Returns:
-        [
-            {
-                "phase_index": 0,
-                "ai_score": 0.82,
-                "score_source": "model" | "heuristic",
-                "rank": 1
-            },
-            ...
-        ]
     """
     try:
-        # Fetch phases with metrics
+        # Fetch phases (safe columns only - no GMV/order/click leak)
         sql = text("""
             SELECT
                 vp.phase_index,
@@ -2642,17 +2632,6 @@ async def get_event_scores(
                 vp.time_end,
                 vp.cta_score,
                 vp.sales_psychology_tags,
-                vp.audio_features,
-                COALESCE(vp.gmv, 0) as gmv,
-                COALESCE(vp.order_count, 0) as order_count,
-                COALESCE(vp.viewer_count, 0) as viewer_count,
-                COALESCE(vp.like_count, 0) as like_count,
-                COALESCE(vp.comment_count, 0) as comment_count,
-                COALESCE(vp.share_count, 0) as share_count,
-                COALESCE(vp.new_followers, 0) as new_followers,
-                COALESCE(vp.product_clicks, 0) as product_clicks,
-                COALESCE(vp.conversion_rate, 0) as conversion_rate,
-                COALESCE(vp.gpm, 0) as gpm,
                 COALESCE(vp.importance_score, 0) as importance_score
             FROM video_phases vp
             WHERE vp.video_id = :video_id
@@ -2667,9 +2646,15 @@ async def get_event_scores(
         phases = result.fetchall()
 
         if not phases:
-            return []
+            return {"model_version": None, "score_source": "none", "scores": []}
 
-        # Fetch sales moments for this video
+        # Fetch video duration for position normalization
+        dur_sql = text("SELECT duration_seconds FROM videos WHERE video_id = :vid")
+        dur_result = await db.execute(dur_sql, {"vid": video_id})
+        dur_row = dur_result.fetchone()
+        video_duration = float(dur_row.duration_seconds) if dur_row and dur_row.duration_seconds else 0
+
+        # Fetch sales moments
         moments = []
         try:
             sm_sql = text("""
@@ -2681,192 +2666,275 @@ async def get_event_scores(
             sm_result = await db.execute(sm_sql, {"video_id": video_id})
             moments = sm_result.fetchall()
         except Exception:
-            pass  # Table may not exist yet
+            pass
 
-        # Fetch product exposures
-        products = []
+        # Fetch product stats for product name matching
+        product_names = []
         try:
-            pe_sql = text("""
-                SELECT product_name, time_start, time_end
-                FROM video_product_exposures
+            ps_sql = text("""
+                SELECT product_name
+                FROM video_product_stats
                 WHERE video_id = :video_id
+                ORDER BY COALESCE(product_clicks, 0) DESC
             """)
-            pe_result = await db.execute(pe_sql, {"video_id": video_id})
-            products = pe_result.fetchall()
+            ps_result = await db.execute(ps_sql, {"video_id": video_id})
+            product_names = [r.product_name for r in ps_result.fetchall() if r.product_name]
         except Exception:
             pass
 
-        # Try model-based prediction first
-        scores = _predict_with_model(phases, moments, products)
-        score_source = "model"
+        # Try model-based prediction
+        model_result = _predict_with_model_v4(phases, moments, product_names, video_duration)
 
-        if scores is None:
-            # Fallback to heuristic
-            scores = _predict_heuristic(phases, moments, products)
+        if model_result is not None:
+            click_scores, order_scores, model_version = model_result
+            score_source = "model"
+        else:
+            click_scores = _predict_heuristic_v4(phases, moments)
+            order_scores = click_scores  # heuristic doesn't distinguish
+            model_version = None
             score_source = "heuristic"
 
-        # Build response with ranking
+        # Build response with Click / Order / Combined scores
         result_list = []
-        for phase, score in zip(phases, scores):
+        for i, phase in enumerate(phases):
+            click_s = click_scores[i]
+            order_s = order_scores[i]
+            combined = round(0.7 * click_s + 0.3 * order_s, 4)
+
+            # Feature importance explanation (rule-based, top 3 reasons)
+            reasons = _explain_score(phase, moments, product_names, video_duration)
+
             result_list.append({
                 "phase_index": phase.phase_index,
-                "ai_score": round(score, 4),
+                "score_click": round(click_s, 4),
+                "score_order": round(order_s, 4),
+                "score_combined": combined,
                 "score_source": score_source,
+                "reasons": reasons,
             })
 
-        # Add rank
-        sorted_by_score = sorted(result_list, key=lambda x: x["ai_score"], reverse=True)
+        # Add rank by combined score
+        sorted_by_score = sorted(result_list, key=lambda x: x["score_combined"], reverse=True)
         for rank, item in enumerate(sorted_by_score, 1):
             item["rank"] = rank
 
         # Re-sort by phase_index for output
         result_list.sort(key=lambda x: x["phase_index"])
 
-        return result_list
+        return {
+            "model_version": model_version,
+            "score_source": score_source,
+            "scores": result_list,
+        }
 
     except Exception as e:
         logger.error(f"[EVENT_SCORES] Failed for {video_id}: {e}")
-        return []
+        return {"model_version": None, "score_source": "error", "scores": []}
 
 
-def _predict_with_model(phases, moments, products):
-    """Try to predict using trained model. Returns None if model not available."""
-    import os
-    import pickle
+# ── Keyword extraction (same as generate_dataset.py) ──
+import re as _re
 
-    model_dir = os.environ.get("AI_MODEL_DIR", "/home/lcj/models")
+_KEYWORD_GROUPS = [
+    ("kw_price",      [r"円", r"¥", r"\d+円", r"価格", r"値段", r"プライス"]),
+    ("kw_discount",   [r"割引", r"割", r"OFF", r"オフ", r"セール", r"半額", r"お得", r"特別価格"]),
+    ("kw_urgency",    [r"今だけ", r"限定", r"残り", r"ラスト", r"早い者勝ち", r"なくなり次第", r"本日限り"]),
+    ("kw_cta",        [r"リンク", r"カート", r"タップ", r"クリック", r"押して", r"ポチ", r"購入", r"買って"]),
+    ("kw_quantity",   [r"残り\d+", r"\d+個", r"\d+点", r"在庫", r"ストック"]),
+    ("kw_comparison", [r"通常", r"定価", r"普通", r"比べ", r"違い", r"他と"]),
+    ("kw_quality",    [r"品質", r"成分", r"効果", r"おすすめ", r"人気", r"ランキング"]),
+    ("kw_number",     [r"\d{3,}"]),
+]
 
-    # Check for model file
-    lgbm_path = os.path.join(model_dir, "model_lgbm.pkl")
-    lr_path = os.path.join(model_dir, "model_lr.pkl")
-    feature_path = os.path.join(model_dir, "feature_names.json")
 
-    model = None
-    model_type = None
-    scaler = None
+def _extract_kw_flags(text_str):
+    if not text_str:
+        return {g[0]: 0 for g in _KEYWORD_GROUPS}
+    flags = {}
+    for flag_name, patterns in _KEYWORD_GROUPS:
+        matched = 0
+        for pat in patterns:
+            if _re.search(pat, text_str, _re.IGNORECASE):
+                matched = 1
+                break
+        flags[flag_name] = matched
+    return flags
 
-    if os.path.exists(lgbm_path):
-        try:
-            with open(lgbm_path, "rb") as f:
-                model = pickle.load(f)
-            model_type = "lgbm"
-        except Exception:
-            pass
 
-    if model is None and os.path.exists(lr_path):
-        try:
-            with open(lr_path, "rb") as f:
-                obj = pickle.load(f)
-            model = obj["model"]
-            scaler = obj.get("scaler")
-            model_type = "lr"
-        except Exception:
-            pass
+def _check_product_match(text_str, product_names):
+    if not text_str or not product_names:
+        return 0, 0, 0
+    text_lower = text_str.lower()
+    matched = 0
+    matched_top3 = 0
+    for i, name in enumerate(product_names):
+        if not name:
+            continue
+        short = name[:6].lower().strip()
+        if len(short) >= 2 and short in text_lower:
+            matched += 1
+            if i < 3:
+                matched_top3 = 1
+    return (1 if matched > 0 else 0), matched_top3, matched
 
-    if model is None:
-        return None
 
-    # Build feature matrix
+# ── Known event types (must match train.py v4) ──
+_KNOWN_EVENT_TYPES = [
+    "HOOK", "GREETING", "INTRO", "DEMONSTRATION", "PRICE",
+    "CTA", "OBJECTION", "SOCIAL_PROOF", "URGENCY",
+    "EMPATHY", "EDUCATION", "CHAT", "TRANSITION", "CLOSING", "UNKNOWN",
+]
+
+
+def _build_feature_vector_v4(phase, product_names, video_duration):
+    """Build feature vector matching generate_dataset.py v2 / train.py v4 schema."""
     import numpy as np
 
-    NUMERIC_FEATURES = [
-        "duration", "cta_score", "gmv", "order_count", "viewer_count",
-        "like_count", "comment_count", "share_count", "new_followers",
-        "product_clicks", "conversion_rate", "gpm", "importance_score",
-    ]
-    BOOL_FEATURES = ["product_match"]
-    AUDIO_FEATURES = ["audio_energy_mean", "audio_tempo", "audio_pitch_mean", "audio_speech_rate"]
-    KNOWN_EVENT_TYPES = [
-        "HOOK", "GREETING", "INTRO", "DEMO", "PRICE",
-        "CTA", "OBJECTION", "SOCIAL_PROOF", "URGENCY",
-        "EMPATHY", "CHAT", "TRANSITION", "CLOSING", "UNKNOWN",
-    ]
+    time_start = float(phase.time_start) if phase.time_start else 0
+    time_end = float(phase.time_end) if phase.time_end else 0
+    duration = time_end - time_start
+    desc = phase.phase_description or ""
 
-    n_features = len(NUMERIC_FEATURES) + len(BOOL_FEATURES) + len(AUDIO_FEATURES) + len(KNOWN_EVENT_TYPES)
-    X = np.zeros((len(phases), n_features), dtype=np.float32)
+    # Tags
+    tags = []
+    try:
+        raw = phase.sales_psychology_tags
+        if raw:
+            tags = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        pass
+    event_type = tags[0] if tags else "UNKNOWN"
 
-    for i, phase in enumerate(phases):
-        col = 0
-        time_start = float(phase.time_start) if phase.time_start else 0
-        time_end = float(phase.time_end) if phase.time_end else 0
-        duration = time_end - time_start
+    # Keyword flags
+    kw = _extract_kw_flags(desc)
 
-        # Parse tags
-        tags = []
-        try:
-            raw = phase.sales_psychology_tags
-            if raw:
-                tags = json.loads(raw) if isinstance(raw, str) else raw
-        except Exception:
-            pass
-        event_type = tags[0] if tags else "UNKNOWN"
+    # Text features
+    text_length = len(desc) if desc else 0
+    has_number = 1 if _re.search(r"\d+", desc) else 0
+    exclamation_count = desc.count("！") + desc.count("!") if desc else 0
 
-        # Parse audio
-        audio = {}
-        try:
-            raw = phase.audio_features
-            if raw:
-                audio = json.loads(raw) if isinstance(raw, str) else raw
-                if not isinstance(audio, dict):
-                    audio = {}
-        except Exception:
-            pass
+    # Product match
+    pm, pm_top3, pm_count = _check_product_match(desc, product_names)
 
-        # Product match
-        has_product = False
-        for p in products:
-            if p.time_start <= time_end and p.time_end >= time_start:
-                has_product = True
-                break
+    # Position
+    event_position_min = round(time_start / 60.0, 1)
+    event_position_pct = round(time_start / video_duration, 3) if video_duration > 0 else 0.0
 
-        # Fill features
-        vals = {
-            "duration": duration,
-            "cta_score": float(phase.cta_score) if phase.cta_score else 0,
-            "gmv": float(phase.gmv),
-            "order_count": float(phase.order_count),
-            "viewer_count": float(phase.viewer_count),
-            "like_count": float(phase.like_count),
-            "comment_count": float(phase.comment_count),
-            "share_count": float(phase.share_count),
-            "new_followers": float(phase.new_followers),
-            "product_clicks": float(phase.product_clicks),
-            "conversion_rate": float(phase.conversion_rate),
-            "gpm": float(phase.gpm),
-            "importance_score": float(phase.importance_score),
-        }
+    # Build feature dict in exact order matching features_used in manifest
+    features = {
+        "event_duration": round(duration, 1),
+        "event_position_min": event_position_min,
+        "event_position_pct": event_position_pct,
+        "tag_count": len(tags),
+        "cta_score": float(phase.cta_score) if phase.cta_score else 0,
+        "importance_score": float(phase.importance_score),
+        "text_length": text_length,
+        "has_number": has_number,
+        "exclamation_count": exclamation_count,
+        **kw,
+        "product_match": pm,
+        "product_match_top3": pm_top3,
+        "matched_product_count": pm_count,
+    }
 
-        for feat in NUMERIC_FEATURES:
-            X[i, col] = vals.get(feat, 0)
-            col += 1
+    # Event type one-hot
+    for et in _KNOWN_EVENT_TYPES:
+        features[f"event_{et}"] = 1 if event_type == et else 0
 
-        X[i, col] = 1.0 if has_product else 0.0
-        col += 1
+    return features
 
-        for feat in AUDIO_FEATURES:
-            X[i, col] = float(audio.get(feat.replace("audio_", ""), 0) or 0)
-            col += 1
 
-        for et in KNOWN_EVENT_TYPES:
-            X[i, col] = 1.0 if event_type == et else 0.0
-            col += 1
+def _predict_with_model_v4(phases, moments, product_names, video_duration):
+    """
+    Predict using trained v4 model with manifest.json for feature compatibility.
+    Returns (click_scores, order_scores, model_version) or None.
+    """
+    import os
+    import pickle
+    import numpy as np
 
-    if model_type == "lr" and scaler:
-        X = scaler.transform(X)
+    model_dir = os.environ.get(
+        "AI_MODEL_DIR",
+        "/var/www/aitherhub/worker/batch/models"
+    )
+    manifest_path = os.path.join(model_dir, "manifest.json")
+
+    if not os.path.exists(manifest_path):
+        return None
 
     try:
-        probas = model.predict_proba(X)
-        return [float(p[1]) if len(p) > 1 else float(p[0]) for p in probas]
+        with open(manifest_path, "r") as f:
+            manifest = json.load(f)
     except Exception:
         return None
 
+    model_version = manifest.get("model_version", "unknown")
+    features_used = manifest.get("features_used", [])
 
-def _predict_heuristic(phases, moments, products):
+    if not features_used:
+        return None
+
+    # Build feature matrix
+    X = np.zeros((len(phases), len(features_used)), dtype=np.float32)
+
+    for i, phase in enumerate(phases):
+        feat_dict = _build_feature_vector_v4(phase, product_names, video_duration)
+        for j, feat_name in enumerate(features_used):
+            X[i, j] = float(feat_dict.get(feat_name, 0))
+
+    # Load and predict for each target
+    results = {}
+    for target in ["click", "order"]:
+        model_info = manifest.get("models", {}).get(target, {})
+        if not model_info:
+            continue
+
+        best_type = model_info.get("best_model", "lgbm")
+        files = model_info.get("files", {})
+        model_file = files.get(best_type)
+
+        if not model_file:
+            continue
+
+        model_path = os.path.join(model_dir, model_file)
+        if not os.path.exists(model_path):
+            continue
+
+        try:
+            with open(model_path, "rb") as f:
+                obj = pickle.load(f)
+
+            if best_type == "lgbm":
+                model = obj
+                probas = model.predict_proba(X)
+            else:  # lr
+                model = obj["model"]
+                scaler = obj.get("scaler")
+                X_scaled = scaler.transform(X) if scaler else X
+                probas = model.predict_proba(X_scaled)
+
+            scores = [float(p[1]) if len(p) > 1 else float(p[0]) for p in probas]
+            results[target] = scores
+        except Exception as e:
+            logger.warning(f"[EVENT_SCORES] Model {target}/{best_type} failed: {e}")
+            continue
+
+    if not results:
+        return None
+
+    n = len(phases)
+    click_scores = results.get("click", [0.5] * n)
+    order_scores = results.get("order", [0.5] * n)
+
+    return click_scores, order_scores, model_version
+
+
+def _predict_heuristic_v4(phases, moments):
     """
     Heuristic scoring when no model is available.
-    Uses a weighted combination of available signals.
+    Uses safe signals only (no GMV/order/click leak).
     """
-    STRONG_WINDOW = 150  # seconds
+    STRONG_WINDOW = 150
 
     scores = []
     for phase in phases:
@@ -2874,38 +2942,28 @@ def _predict_heuristic(phases, moments, products):
         time_start = float(phase.time_start) if phase.time_start else 0
         time_end = float(phase.time_end) if phase.time_end else 0
         phase_mid = (time_start + time_end) / 2
+        desc = phase.phase_description or ""
 
-        # 1. CTA score contribution (0-0.25)
+        # 1. CTA score (0-0.30)
         cta = float(phase.cta_score) if phase.cta_score else 0
-        score += (cta / 5.0) * 0.25
+        score += (cta / 5.0) * 0.30
 
-        # 2. Importance score contribution (0-0.20)
+        # 2. Importance score (0-0.20)
         imp = float(phase.importance_score) if phase.importance_score else 0
         score += imp * 0.20
 
-        # 3. Product clicks contribution (0-0.15)
-        clicks = float(phase.product_clicks) if phase.product_clicks else 0
-        if clicks > 0:
-            # Normalize: assume 50+ clicks is max
-            score += min(clicks / 50.0, 1.0) * 0.15
-
-        # 4. GMV contribution (0-0.15)
-        gmv = float(phase.gmv) if phase.gmv else 0
-        if gmv > 0:
-            score += min(gmv / 5000.0, 1.0) * 0.15
-
-        # 5. Sales moment proximity (0-0.15)
+        # 3. Sales moment proximity (0-0.20)
         for m in moments:
             dist = abs(float(m.video_sec) - phase_mid)
             if dist <= STRONG_WINDOW:
                 if m.moment_type == "strong":
-                    score += 0.15
+                    score += 0.20
                     break
                 elif m.moment_type in ("click_spike", "order_spike"):
-                    score += 0.10
+                    score += 0.12
                     break
 
-        # 6. Event type bonus (0-0.10)
+        # 4. Event type bonus (0-0.15)
         tags = []
         try:
             raw = phase.sales_psychology_tags
@@ -2913,11 +2971,105 @@ def _predict_heuristic(phases, moments, products):
                 tags = json.loads(raw) if isinstance(raw, str) else raw
         except Exception:
             pass
-
         high_value_types = {"PRICE", "CTA", "URGENCY", "SOCIAL_PROOF"}
         if any(t in high_value_types for t in tags):
-            score += 0.10
+            score += 0.15
+
+        # 5. Keyword bonus (0-0.15)
+        kw = _extract_kw_flags(desc)
+        kw_score = sum([
+            kw.get("kw_price", 0) * 0.04,
+            kw.get("kw_discount", 0) * 0.03,
+            kw.get("kw_urgency", 0) * 0.03,
+            kw.get("kw_cta", 0) * 0.03,
+            kw.get("kw_quantity", 0) * 0.02,
+        ])
+        score += kw_score
 
         scores.append(min(score, 1.0))
 
     return scores
+
+
+def _explain_score(phase, moments, product_names, video_duration):
+    """
+    Generate top-3 human-readable reasons for the score.
+    Rule-based, no LLM needed.
+    """
+    reasons = []
+    time_start = float(phase.time_start) if phase.time_start else 0
+    time_end = float(phase.time_end) if phase.time_end else 0
+    duration = time_end - time_start
+    phase_mid = (time_start + time_end) / 2
+    desc = phase.phase_description or ""
+
+    # Position in stream
+    pos_min = round(time_start / 60.0, 1)
+    if 5 <= pos_min <= 30:
+        reasons.append(f"配信中盤（{pos_min:.0f}分台）")
+    elif pos_min < 5:
+        reasons.append(f"配信序盤（{pos_min:.0f}分台）")
+    elif pos_min > 30:
+        reasons.append(f"配信終盤（{pos_min:.0f}分台）")
+
+    # Duration
+    if 20 <= duration <= 60:
+        reasons.append(f"{duration:.0f}秒でテンポ良い")
+    elif duration > 120:
+        reasons.append(f"{duration:.0f}秒の長尺（じっくり説明）")
+
+    # CTA
+    cta = float(phase.cta_score) if phase.cta_score else 0
+    if cta >= 4:
+        reasons.append("CTA強め（カート誘導あり）")
+    elif cta >= 3:
+        reasons.append("CTA中程度")
+
+    # Keywords
+    kw = _extract_kw_flags(desc)
+    if kw.get("kw_price"):
+        reasons.append("価格提示あり")
+    if kw.get("kw_discount"):
+        reasons.append("割引・セール言及")
+    if kw.get("kw_urgency"):
+        reasons.append("緊急性（今だけ/限定）")
+    if kw.get("kw_cta"):
+        reasons.append("購入誘導ワードあり")
+
+    # Sales moment proximity
+    for m in moments:
+        dist = abs(float(m.video_sec) - phase_mid)
+        if dist <= 150:
+            if m.moment_type == "strong":
+                reasons.append("売上スパイク窓内")
+            elif m.moment_type == "click_spike":
+                reasons.append("クリックスパイク窓内")
+            break
+
+    # Event type
+    tags = []
+    try:
+        raw = phase.sales_psychology_tags
+        if raw:
+            tags = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        pass
+    type_labels = {
+        "PRICE": "価格提示フェーズ",
+        "CTA": "CTAフェーズ",
+        "URGENCY": "緊急性フェーズ",
+        "SOCIAL_PROOF": "社会的証明フェーズ",
+        "DEMONSTRATION": "デモフェーズ",
+    }
+    for t in tags:
+        if t in type_labels:
+            reasons.append(type_labels[t])
+            break
+
+    # Product match
+    if product_names and desc:
+        pm, _, _ = _check_product_match(desc, product_names)
+        if pm:
+            reasons.append("商品名言及あり")
+
+    return reasons[:3]  # Top 3 only
