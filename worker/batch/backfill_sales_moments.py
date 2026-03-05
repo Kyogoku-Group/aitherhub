@@ -2,7 +2,7 @@
 backfill_sales_moments.py  –  既存動画のsales_momentsをDBに投入
 ==================================================================
 Worker VM上で直接実行する。
-全てasync関数を使い、イベントループ競合を回避。
+ローカルの excel_data/{video_id}/trend_stats.xlsx から読み込む。
 
 使い方:
   python backfill_sales_moments.py                    # 全動画
@@ -12,12 +12,10 @@ Worker VM上で直接実行する。
 
 import argparse
 import asyncio
+import glob
 import os
 import sys
-import tempfile
 import traceback
-
-import requests as http_requests
 
 sys.path.insert(0, os.path.dirname(__file__))
 from dotenv import load_dotenv
@@ -29,8 +27,8 @@ from sqlalchemy import text as sa_text
 
 from csv_slot_filter import detect_sales_moments
 from db_ops import (
-    ensure_sales_moments_table,      # async version
-    bulk_insert_sales_moments,        # async version
+    ensure_sales_moments_table,
+    bulk_insert_sales_moments,
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -39,6 +37,20 @@ if not DATABASE_URL:
 
 engine = create_async_engine(DATABASE_URL, pool_pre_ping=True, echo=False)
 AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+# Local Excel data directory
+EXCEL_DATA_DIR = os.path.join(os.path.dirname(__file__), "excel_data")
+
+
+def find_local_trend_file(video_id: str) -> str | None:
+    """Find local trend_stats.xlsx for a video."""
+    path = os.path.join(EXCEL_DATA_DIR, video_id, "trend_stats.xlsx")
+    if os.path.exists(path):
+        return path
+    # Also check for other naming patterns
+    pattern = os.path.join(EXCEL_DATA_DIR, video_id, "*trend*.xlsx")
+    matches = glob.glob(pattern)
+    return matches[0] if matches else None
 
 
 def parse_trend_excel_safe(file_path: str):
@@ -54,7 +66,7 @@ def parse_trend_excel_safe(file_path: str):
 async def backfill_all(video_id: str = None, limit: int = None):
     """Backfill sales_moments for existing videos."""
 
-    # Ensure table exists (async version)
+    # Ensure table exists
     try:
         await ensure_sales_moments_table()
         print("[backfill] video_sales_moments table ensured.")
@@ -62,40 +74,11 @@ async def backfill_all(video_id: str = None, limit: int = None):
         print(f"[backfill] Table creation note: {e}")
 
     async with AsyncSessionLocal() as session:
-        # First, check what columns exist
-        try:
-            col_check = await session.execute(sa_text(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'videos' ORDER BY ordinal_position"
-            ))
-            cols = [r[0] for r in col_check.fetchall()]
-            print(f"[backfill] videos columns: {cols[:20]}...")
-        except Exception as e:
-            print(f"[backfill] Column check failed: {e}")
-            cols = []
-
-        # Determine correct column names
-        name_col = "original_filename" if "original_filename" in cols else "filename"
-        has_trend_url = "excel_trend_blob_url" in cols
-        has_time_offset = "time_offset_seconds" in cols
-
-        if not has_trend_url:
-            print("[backfill] ERROR: excel_trend_blob_url column not found in videos table.")
-            print(f"[backfill] Available columns: {cols}")
-            return
-
-        # Build SQL dynamically
-        select_cols = f"id, {name_col}"
-        select_cols += ", excel_trend_blob_url"
-        if has_time_offset:
-            select_cols += ", time_offset_seconds"
-
-        sql = f"""
-            SELECT {select_cols}
+        # Get completed videos
+        sql = """
+            SELECT id, original_filename, time_offset_seconds
             FROM videos
             WHERE status IN ('completed', 'DONE')
-              AND excel_trend_blob_url IS NOT NULL
-              AND excel_trend_blob_url != ''
         """
         if video_id:
             sql += f" AND id = '{video_id}'"
@@ -103,31 +86,31 @@ async def backfill_all(video_id: str = None, limit: int = None):
         if limit:
             sql += f" LIMIT {limit}"
 
-        print(f"[backfill] SQL: {sql[:200]}...")
         result = await session.execute(sa_text(sql))
         videos = result.fetchall()
-        print(f"[backfill] Found {len(videos)} videos with trend data.")
+        print(f"[backfill] Found {len(videos)} completed videos.")
 
-        if len(videos) == 0:
-            # Debug: check total videos and their trend URLs
-            debug_sql = sa_text(
-                "SELECT id, status, excel_trend_blob_url IS NOT NULL as has_trend "
-                "FROM videos ORDER BY created_at DESC LIMIT 10"
-            )
-            debug_result = await session.execute(debug_sql)
-            for r in debug_result.fetchall():
-                print(f"  DEBUG: {r.id} status={r.status} has_trend={r.has_trend}")
-            return
+        # Check available local Excel files
+        local_video_ids = set()
+        if os.path.exists(EXCEL_DATA_DIR):
+            local_video_ids = set(os.listdir(EXCEL_DATA_DIR))
+        print(f"[backfill] Local excel_data dirs: {len(local_video_ids)}")
 
         success_count = 0
         skip_count = 0
+        no_file_count = 0
         error_count = 0
 
         for v in videos:
             vid = str(v[0])
             filename = str(v[1]) if v[1] else "unknown"
-            excel_url = v[2]
-            time_offset = float(v[3]) if has_time_offset and len(v) > 3 and v[3] else 0.0
+            time_offset = float(v[2]) if v[2] else 0.0
+
+            # Find local trend file
+            trend_path = find_local_trend_file(vid)
+            if not trend_path:
+                no_file_count += 1
+                continue
 
             print(f"\n[{vid[:8]}] {filename}")
 
@@ -143,33 +126,16 @@ async def backfill_all(video_id: str = None, limit: int = None):
                     skip_count += 1
                     continue
             except Exception:
-                pass  # Table might not exist yet
-
-            # Download Excel
-            try:
-                resp = http_requests.get(excel_url, timeout=30)
-                if resp.status_code != 200:
-                    print(f"  [ERROR] Download failed: HTTP {resp.status_code}")
-                    error_count += 1
-                    continue
-            except Exception as e:
-                print(f"  [ERROR] Download failed: {e}")
-                error_count += 1
-                continue
-
-            # Save to temp file and parse
-            with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-                tmp.write(resp.content)
-                tmp_path = tmp.name
+                pass
 
             try:
-                trend_data = parse_trend_excel_safe(tmp_path)
+                trend_data = parse_trend_excel_safe(trend_path)
                 if trend_data is None or trend_data.empty:
-                    print(f"  [SKIP] No trend data parsed.")
+                    print(f"  [SKIP] No trend data parsed from {trend_path}")
                     skip_count += 1
                     continue
 
-                print(f"  Trend data: {len(trend_data)} rows, cols: {list(trend_data.columns)[:5]}")
+                print(f"  Trend data: {len(trend_data)} rows")
 
                 # Detect sales moments
                 moments = detect_sales_moments(
@@ -182,27 +148,34 @@ async def backfill_all(video_id: str = None, limit: int = None):
                     skip_count += 1
                     continue
 
-                print(f"  Detected {len(moments)} moments")
+                # Count by type
+                type_counts = {}
+                for m in moments:
+                    t = m.get("moment_type", "?")
+                    type_counts[t] = type_counts.get(t, 0) + 1
+                print(f"  Detected {len(moments)} moments: {type_counts}")
 
-                # Save to DB (async version)
+                # Save to DB
                 await bulk_insert_sales_moments(vid, moments)
-                print(f"  ✅ Saved {len(moments)} moments to DB")
+                print(f"  Saved to DB")
                 success_count += 1
 
             except Exception as e:
-                print(f"  [ERROR] Processing failed: {e}")
+                print(f"  [ERROR] {e}")
                 traceback.print_exc()
                 error_count += 1
-            finally:
-                os.unlink(tmp_path)
 
         print(f"\n{'='*60}")
-        print(f"[backfill] DONE: success={success_count}, skip={skip_count}, error={error_count}")
-        print(f"[backfill] Total videos: {len(videos)}")
+        print(f"[backfill] DONE")
+        print(f"  success:  {success_count}")
+        print(f"  skip:     {skip_count}")
+        print(f"  no_file:  {no_file_count}")
+        print(f"  error:    {error_count}")
+        print(f"  total:    {len(videos)}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Backfill sales_moments for existing videos")
+    parser = argparse.ArgumentParser(description="Backfill sales_moments")
     parser.add_argument("--video-id", default=None, help="Specific video ID")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of videos")
     args = parser.parse_args()
