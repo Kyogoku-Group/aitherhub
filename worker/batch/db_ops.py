@@ -1810,3 +1810,141 @@ async def update_worker_claimed(video_id: str, instance_id: str, dequeue_count: 
 def update_worker_claimed_sync(video_id: str, instance_id: str, dequeue_count: int):
     loop = get_event_loop()
     return loop.run_until_complete(update_worker_claimed(video_id, instance_id, dequeue_count))
+
+
+# =========================================================
+# Sales Moments (video_sales_moments)
+# =========================================================
+# AI学習の「正解ラベル」として使用される。
+# trend_statsのclick_spike/order_spikeから検出した
+# 「売れた瞬間」を保存する。
+# ルールA: 既存テーブルは触らない。完全に新規テーブル。
+
+async def ensure_sales_moments_table():
+    """CREATE TABLE IF NOT EXISTS for video_sales_moments."""
+    sql = text("""
+        CREATE TABLE IF NOT EXISTS video_sales_moments (
+            id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+            video_id UUID NOT NULL,
+            time_key VARCHAR(50),
+            time_sec FLOAT NOT NULL,
+            video_sec FLOAT NOT NULL,
+            moment_type VARCHAR(20) NOT NULL,
+            click_value FLOAT DEFAULT 0,
+            click_delta FLOAT DEFAULT 0,
+            click_sigma_score FLOAT DEFAULT 0,
+            order_value FLOAT DEFAULT 0,
+            order_delta FLOAT DEFAULT 0,
+            gmv_value FLOAT DEFAULT 0,
+            confidence FLOAT DEFAULT 0,
+            reasons TEXT,
+            created_at TIMESTAMPTZ DEFAULT now(),
+            updated_at TIMESTAMPTZ DEFAULT now()
+        )
+    """)
+    idx1 = text("""
+        CREATE INDEX IF NOT EXISTS ix_vsm_video_id
+        ON video_sales_moments (video_id)
+    """)
+    idx2 = text("""
+        CREATE INDEX IF NOT EXISTS ix_vsm_video_time
+        ON video_sales_moments (video_id, video_sec)
+    """)
+    idx3 = text("""
+        CREATE INDEX IF NOT EXISTS ix_vsm_moment_type
+        ON video_sales_moments (moment_type)
+    """)
+    async with AsyncSessionLocal() as session:
+        await session.execute(sql)
+        await session.execute(idx1)
+        await session.execute(idx2)
+        await session.execute(idx3)
+        await session.commit()
+
+
+def ensure_sales_moments_table_sync():
+    loop = get_event_loop()
+    return loop.run_until_complete(ensure_sales_moments_table())
+
+
+async def bulk_insert_sales_moments(
+    video_id: str,
+    moments: list,
+):
+    """
+    検出されたsales_momentsを一括挿入する。
+    既存データは削除してから挿入（冪等性）。
+    """
+    if not moments:
+        return
+
+    import json as _json
+
+    delete_sql = text("""
+        DELETE FROM video_sales_moments
+        WHERE video_id = :video_id
+    """)
+
+    insert_sql = text("""
+        INSERT INTO video_sales_moments
+            (video_id, time_key, time_sec, video_sec, moment_type,
+             click_value, click_delta, click_sigma_score,
+             order_value, order_delta, gmv_value,
+             confidence, reasons)
+        VALUES
+            (:video_id, :time_key, :time_sec, :video_sec, :moment_type,
+             :click_value, :click_delta, :click_sigma_score,
+             :order_value, :order_delta, :gmv_value,
+             :confidence, :reasons)
+    """)
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete_sql, {"video_id": video_id})
+
+        for m in moments:
+            await session.execute(insert_sql, {
+                "video_id": video_id,
+                "time_key": m.get("time_key", ""),
+                "time_sec": m.get("time_sec", 0),
+                "video_sec": m.get("video_sec", 0),
+                "moment_type": m.get("moment_type", "click"),
+                "click_value": m.get("click_value", 0),
+                "click_delta": m.get("click_delta", 0),
+                "click_sigma_score": m.get("click_sigma_score", 0),
+                "order_value": m.get("order_value", 0),
+                "order_delta": m.get("order_delta", 0),
+                "gmv_value": m.get("gmv_value", 0),
+                "confidence": m.get("confidence", 0),
+                "reasons": _json.dumps(m.get("reasons", []), ensure_ascii=False),
+            })
+
+        await session.commit()
+
+
+def bulk_insert_sales_moments_sync(video_id: str, moments: list):
+    loop = get_event_loop()
+    return loop.run_until_complete(
+        bulk_insert_sales_moments(video_id, moments)
+    )
+
+
+async def get_sales_moments(video_id: str):
+    """動画のsales_momentsを取得する"""
+    sql = text("""
+        SELECT id, video_id, time_key, time_sec, video_sec, moment_type,
+               click_value, click_delta, click_sigma_score,
+               order_value, order_delta, gmv_value,
+               confidence, reasons, created_at
+        FROM video_sales_moments
+        WHERE video_id = :video_id
+        ORDER BY video_sec ASC
+    """)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(sql, {"video_id": video_id})
+        rows = result.fetchall()
+        return [dict(row._mapping) for row in rows]
+
+
+def get_sales_moments_sync(video_id: str):
+    loop = get_event_loop()
+    return loop.run_until_complete(get_sales_moments(video_id))

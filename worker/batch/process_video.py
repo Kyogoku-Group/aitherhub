@@ -79,6 +79,8 @@ from db_ops import (
     get_video_excel_urls_sync,
     ensure_product_exposures_table_sync,
     bulk_insert_product_exposures_sync,
+    ensure_sales_moments_table_sync,
+    bulk_insert_sales_moments_sync,
 )
 
 from video_structure_features import build_video_structure_features
@@ -87,7 +89,7 @@ from video_structure_group_stats import recompute_video_structure_group_stats
 from best_video_pipeline import process_best_video
 
 from excel_parser import load_excel_data, match_sales_to_phase, build_phase_stats_from_csv
-from csv_slot_filter import get_important_time_ranges, filter_phases_by_importance
+from csv_slot_filter import get_important_time_ranges, filter_phases_by_importance, detect_sales_moments
 from video_status import VideoStatus
 from video_compressor import compress_and_replace
 from product_detection_pipeline import detect_product_timeline
@@ -1028,6 +1030,43 @@ def main():
             logger.info("[EXCEL] Sales data + CSV metrics merged into %d phases", len(phase_units))
         if excel_data and excel_data.get("has_product_data"):
             logger.info("[EXCEL] Product data available: %d products", len(excel_data["products"]))
+
+        # =========================
+        # STEP 5.6 – SALES MOMENT DETECTION (Feature Flag)
+        # =========================
+        # ルールB: 失敗しても全体は成功扱い
+        # ルールC: ENABLE_SALES_MOMENT=true で有効化
+        enable_sales_moment = os.environ.get("ENABLE_SALES_MOMENT", "true").lower() == "true"
+        if enable_sales_moment and excel_data and excel_data.get("has_trend_data"):
+            try:
+                logger.info("=== STEP 5.6 – SALES MOMENT DETECTION ===")
+                ensure_sales_moments_table_sync()
+
+                moments = detect_sales_moments(
+                    trends=excel_data["trends"],
+                    time_offset_seconds=time_offset_seconds if time_offset_seconds else 0,
+                )
+
+                if moments:
+                    bulk_insert_sales_moments_sync(
+                        video_id=str(video_id),
+                        moments=moments,
+                    )
+                    logger.info(
+                        "[SALES_MOMENT] Saved %d moments for video %s",
+                        len(moments), video_id,
+                    )
+                else:
+                    logger.info("[SALES_MOMENT] No sales moments detected for video %s", video_id)
+            except Exception as e:
+                # ルールB: 失敗しても全体は成功扱い
+                logger.warning(
+                    "[SALES_MOMENT] ERROR_TYPE=SALES_MOMENT_FAIL – %s (video %s). "
+                    "Continuing with remaining pipeline.",
+                    e, video_id,
+                )
+        elif not enable_sales_moment:
+            logger.info("[SALES_MOMENT] Feature flag ENABLE_SALES_MOMENT is disabled, skipping")
 
         # =========================
         # STEP 6 – PHASE DESCRIPTION

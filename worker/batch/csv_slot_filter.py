@@ -585,3 +585,216 @@ def filter_phases_by_importance(
     )
 
     return results
+
+
+# ======================================================
+# SALES MOMENT DETECTION
+# ======================================================
+# ライブコマースの「売れた瞬間」を検出する。
+# AI学習の「正解ラベル」として使用される。
+#
+# click_spike: 商品クリック数の急増
+# order_spike: 注文数の急増
+# sales_moment: click_spike OR order_spike
+# strong_sales_moment: click_spike AND order_spike
+
+import math
+
+
+def _compute_rolling_stats(values: list[float], window: int = 3) -> list[dict]:
+    """
+    各ポイントの直近window点の平均・標準偏差を計算。
+    先頭window点は利用可能なデータで計算する。
+    """
+    stats = []
+    for i in range(len(values)):
+        start = max(0, i - window)
+        preceding = values[start:i] if i > 0 else [values[0]]
+        if not preceding:
+            preceding = [0]
+        mean = sum(preceding) / len(preceding)
+        variance = sum((v - mean) ** 2 for v in preceding) / len(preceding)
+        std = math.sqrt(variance) if variance > 0 else 0
+        stats.append({"mean": mean, "std": std})
+    return stats
+
+
+def detect_sales_moments(
+    trends: list[dict],
+    time_offset_seconds: float = 0,
+    click_sigma: float = 2.0,
+    click_pct_threshold: float = 0.5,
+    order_pct_threshold: float = 0.3,
+    window: int = 3,
+) -> list[dict]:
+    """
+    trend_statsデータからsales_moment（売れた瞬間）を検出する。
+
+    検出ルール:
+    - click_spike: 直近{window}点平均との差が +{click_sigma}σ以上、
+                   または前回比 +{click_pct_threshold*100}%
+    - order_spike: 前回比 +{order_pct_threshold*100}%
+                   かつ click_spikeが同じスロットにある
+    - sales_moment: click_spike OR order_spike
+    - strong_sales_moment: click_spike AND order_spike
+
+    Args:
+        trends: CSVから読み込んだトレンドデータ（list of dict）
+        time_offset_seconds: 動画のCSVタイムライン内オフセット（秒）
+        click_sigma: click_spike判定のσ倍率
+        click_pct_threshold: click_spike判定の前回比閾値
+        order_pct_threshold: order_spike判定の前回比閾値
+        window: ローリング統計のウィンドウサイズ
+
+    Returns:
+        list of {
+            time_key: str,          # 元のCSV時刻文字列
+            time_sec: float,        # CSVの絶対秒
+            video_sec: float,       # 動画内の相対秒
+            moment_type: str,       # "strong" | "click" | "order"
+            click_value: float,     # 商品クリック数
+            click_delta: float,     # クリック数の前回差分
+            click_sigma_score: float,  # σスコア
+            order_value: float,     # 注文数
+            order_delta: float,     # 注文数の前回差分
+            gmv_value: float,       # GMV
+            confidence: float,      # 0.0-1.0
+            reasons: list[str],     # 検出理由
+        }
+    """
+    if not trends:
+        return []
+
+    time_key = _detect_time_key(trends)
+    if not time_key:
+        logger.warning("[SALES_MOMENT] No time column found")
+        return []
+
+    sample = trends[0]
+    click_key = _find_key(sample, KPI_ALIASES.get("product_clicks", []))
+    order_key = _find_key(sample, KPI_ALIASES.get("order_count", []))
+    gmv_key = _find_key(sample, KPI_ALIASES.get("gmv", []))
+
+    if not click_key and not order_key:
+        logger.warning("[SALES_MOMENT] No click or order columns found")
+        return []
+
+    logger.info(
+        "[SALES_MOMENT] Detecting with keys: click=%s, order=%s, gmv=%s",
+        click_key, order_key, gmv_key,
+    )
+
+    # 時刻順にソートしてデータを抽出
+    timed = []
+    for entry in trends:
+        t_sec = _parse_time_to_seconds(entry.get(time_key))
+        if t_sec is None:
+            continue
+        timed.append({
+            "time_key": str(entry.get(time_key)),
+            "time_sec": t_sec,
+            "click": _safe_float(entry.get(click_key)) or 0 if click_key else 0,
+            "order": _safe_float(entry.get(order_key)) or 0 if order_key else 0,
+            "gmv": _safe_float(entry.get(gmv_key)) or 0 if gmv_key else 0,
+        })
+    timed.sort(key=lambda x: x["time_sec"])
+
+    if not timed:
+        return []
+
+    # CSVの最初のタイムスタンプを基準にvideo_secを計算
+    csv_first_sec = timed[0]["time_sec"]
+    video_start_sec = csv_first_sec + time_offset_seconds
+
+    # ローリング統計を計算
+    click_values = [t["click"] for t in timed]
+    order_values = [t["order"] for t in timed]
+    click_stats = _compute_rolling_stats(click_values, window)
+    order_stats = _compute_rolling_stats(order_values, window)
+
+    moments = []
+    for i, t in enumerate(timed):
+        is_click_spike = False
+        is_order_spike = False
+        reasons = []
+        click_delta = 0
+        order_delta = 0
+        sigma_score = 0.0
+
+        # --- click_spike 検出 ---
+        if click_key:
+            cs = click_stats[i]
+            diff = t["click"] - cs["mean"]
+            sigma_score = diff / cs["std"] if cs["std"] > 0 else 0
+
+            # 条件1: +Nσ以上
+            if cs["std"] > 0 and diff >= click_sigma * cs["std"] and t["click"] > 0:
+                is_click_spike = True
+                reasons.append(f"click_sigma={sigma_score:.1f}")
+
+            # 条件2: 前回比 +50%
+            if i > 0:
+                prev_click = timed[i - 1]["click"]
+                click_delta = t["click"] - prev_click
+                if prev_click > 0 and click_delta / prev_click >= click_pct_threshold:
+                    is_click_spike = True
+                    reasons.append(f"click_pct=+{click_delta/prev_click*100:.0f}%")
+                elif prev_click == 0 and t["click"] > 0:
+                    is_click_spike = True
+                    reasons.append("click_from_zero")
+
+        # --- order_spike 検出 ---
+        if order_key:
+            if i > 0:
+                prev_order = timed[i - 1]["order"]
+                order_delta = t["order"] - prev_order
+                if prev_order > 0 and order_delta / prev_order >= order_pct_threshold:
+                    is_order_spike = True
+                    reasons.append(f"order_pct=+{order_delta/prev_order*100:.0f}%")
+                elif prev_order == 0 and t["order"] > 0:
+                    is_order_spike = True
+                    reasons.append("order_from_zero")
+            elif t["order"] > 0:
+                is_order_spike = True
+                reasons.append("order_first_slot")
+
+        # --- moment_type 判定 ---
+        if not is_click_spike and not is_order_spike:
+            continue
+
+        if is_click_spike and is_order_spike:
+            moment_type = "strong"
+            confidence = min(1.0, 0.7 + abs(sigma_score) * 0.1)
+        elif is_click_spike:
+            moment_type = "click"
+            confidence = min(1.0, 0.4 + abs(sigma_score) * 0.1)
+        else:
+            moment_type = "order"
+            confidence = 0.5
+
+        video_sec = t["time_sec"] - video_start_sec
+
+        moments.append({
+            "time_key": t["time_key"],
+            "time_sec": t["time_sec"],
+            "video_sec": video_sec,
+            "moment_type": moment_type,
+            "click_value": t["click"],
+            "click_delta": click_delta,
+            "click_sigma_score": round(sigma_score, 2),
+            "order_value": t["order"],
+            "order_delta": order_delta,
+            "gmv_value": t["gmv"],
+            "confidence": round(confidence, 2),
+            "reasons": reasons,
+        })
+
+    logger.info(
+        "[SALES_MOMENT] Detected %d moments (%d strong, %d click, %d order)",
+        len(moments),
+        sum(1 for m in moments if m["moment_type"] == "strong"),
+        sum(1 for m in moments if m["moment_type"] == "click"),
+        sum(1 for m in moments if m["moment_type"] == "order"),
+    )
+
+    return moments

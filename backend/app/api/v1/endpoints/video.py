@@ -2391,3 +2391,57 @@ async def live_capture(
         username=username,
         message=f"Live capture started for @{username}; recording and analysis will begin automatically",
     )
+
+# =========================================================
+# Sales Moments API
+# =========================================================
+
+@router.get("/{video_id}/sales-moments")
+async def get_sales_moments(
+    video_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    動画のsales_moments（売れた瞬間）を取得する。
+    ルールA: 既存APIは触らない。完全に新規エンドポイント。
+    テーブルが存在しない場合はからのリストを返す（フォールバック）。
+    """
+    try:
+        sql = text("""
+            SELECT id, video_id, time_key, time_sec, video_sec, moment_type,
+                   click_value, click_delta, click_sigma_score,
+                   order_value, order_delta, gmv_value,
+                   confidence, reasons, created_at
+            FROM video_sales_moments
+            WHERE video_id = :video_id
+            ORDER BY video_sec ASC
+        """)
+        result = await db.execute(sql, {"video_id": video_id})
+        rows = result.fetchall()
+
+        moments = []
+        for row in rows:
+            r = dict(row._mapping)
+            # reasonsはJSON文字列なのでパース
+            if r.get("reasons") and isinstance(r["reasons"], str):
+                try:
+                    r["reasons"] = json.loads(r["reasons"])
+                except Exception:
+                    r["reasons"] = [r["reasons"]]
+            # datetimeをISO文字列に変換
+            if r.get("created_at"):
+                r["created_at"] = r["created_at"].isoformat()
+            # UUIDを文字列に変換
+            if r.get("id"):
+                r["id"] = str(r["id"])
+            if r.get("video_id"):
+                r["video_id"] = str(r["video_id"])
+            moments.append(r)
+
+        return {"sales_moments": moments, "count": len(moments)}
+
+    except Exception as e:
+        # テーブルが存在しない場合など → 空リストを返す（ルールA: フォールバック）
+        logger.warning(f"[SALES_MOMENTS] Failed to fetch for {video_id}: {e}")
+        return {"sales_moments": [], "count": 0}
