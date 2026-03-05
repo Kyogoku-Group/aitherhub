@@ -82,7 +82,7 @@ async def backfill_all(video_id: str = None, limit: int = None):
         sql = """
             SELECT id, original_filename, time_offset_seconds
             FROM videos
-            WHERE status IN ('completed', 'DONE')
+            WHERE status IN ('completed', 'DONE', 'ERROR')
         """
         if video_id:
             sql += f" AND id = '{video_id}'"
