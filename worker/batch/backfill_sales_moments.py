@@ -93,7 +93,7 @@ async def backfill_all(video_id: str = None, limit: int = None):
         sql = f"""
             SELECT {select_cols}
             FROM videos
-            WHERE status = 'completed'
+            WHERE status IN ('completed', 'DONE')
               AND excel_trend_blob_url IS NOT NULL
               AND excel_trend_blob_url != ''
         """
