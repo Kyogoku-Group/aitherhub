@@ -1580,7 +1580,21 @@ export default function VideoDetail({ videoData }) {
         ratingComments={ratingComments}
         onCommentChange={(idx, val) => setRatingComments(prev => ({ ...prev, [idx]: val }))}
         onSaveComment={handleSaveComment}
-        onPhaseNavigate={(phase) => handlePhasePreview(phase)}
+        onPhaseNavigate={(phase) => {
+          // When DockPlayer navigates internally, only update URL params
+          // (DockPlayer already handles video.currentTime directly)
+          const phaseIdx = phase.phase_index ?? (videoData?.reports_1 || []).findIndex(
+            r => r.time_start === phase.time_start && r.time_end === phase.time_end
+          );
+          if (phaseIdx >= 0) {
+            setSearchParams(prev => {
+              const next = new URLSearchParams(prev);
+              next.set('view', 'timeline');
+              next.set('phase', String(phaseIdx));
+              return next;
+            }, { replace: true });
+          }
+        }}
         humanTags={humanTags}
         tagEditState={tagEditState}
         onTagConfirm={handleTagConfirm}

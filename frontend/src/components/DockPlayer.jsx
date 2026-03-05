@@ -121,6 +121,7 @@ export default function DockPlayer({
   const hasSetupRef = useRef(false);
   const prevVideoUrlRef = useRef(null);
   const prevTimeStartRef = useRef(null);
+  const navLockRef = useRef(false);  // Lock to prevent timeupdate from overriding navigatePhase
 
   const [isLoading, setIsLoading] = useState(true);
   const [showCustomLoading, setShowCustomLoading] = useState(true);
@@ -203,6 +204,8 @@ export default function DockPlayer({
     prevTimeStartRef.current = timeStart;
 
     if (!urlChanged && timeChanged && !isClipPreview) {
+      // Skip if navigatePhase just set the index (it already handled seek)
+      if (navLockRef.current) return;
       vid.currentTime = timeStart;
       setCurrentPhaseIndex(findPhaseIndex(timeStart));
       if (vid.paused) vid.play().catch(() => {});
@@ -284,6 +287,8 @@ export default function DockPlayer({
     if (!vid) return;
 
     const onTimeUpdate = () => {
+      // Skip timeupdate if navigatePhase just fired (prevents race condition)
+      if (navLockRef.current) return;
       const idx = findPhaseIndex(vid.currentTime);
       setCurrentPhaseIndex((prev) => (idx !== prev ? idx : prev));
     };
@@ -352,17 +357,27 @@ export default function DockPlayer({
       if (targetIdx === currentPhaseIndex) return;
 
       const targetPhase = reports1[targetIdx];
+
+      // Lock timeupdate to prevent it from overriding our index
+      navLockRef.current = true;
       setCurrentPhaseIndex(targetIdx);
 
+      // Always seek video directly (faster, no async race condition)
+      const vid = videoRef.current;
+      if (vid && !isClipPreview) {
+        vid.currentTime = Number(targetPhase.time_start) || 0;
+        if (vid.paused) vid.play().catch(() => {});
+      }
+
+      // Also notify parent for URL params sync (but don't wait for it)
       if (onPhaseNavigate) {
         onPhaseNavigate(targetPhase);
-      } else {
-        const vid = videoRef.current;
-        if (vid && !isClipPreview) {
-          vid.currentTime = Number(targetPhase.time_start) || 0;
-          if (vid.paused) vid.play().catch(() => {});
-        }
       }
+
+      // Release lock after a short delay to let video seek settle
+      setTimeout(() => {
+        navLockRef.current = false;
+      }, 500);
     },
     [currentPhaseIndex, reports1, isClipPreview, onPhaseNavigate]
   );
