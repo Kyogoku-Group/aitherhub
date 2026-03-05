@@ -93,6 +93,7 @@ export default function DockPlayer({
   open,
   onClose,
   videoUrl,
+  fullVideoUrl,
   timeStart = 0,
   timeEnd = null,
   isClipPreview = false,
@@ -122,6 +123,19 @@ export default function DockPlayer({
   const prevVideoUrlRef = useRef(null);
   const prevTimeStartRef = useRef(null);
   const navLockRef = useRef(false);  // Lock to prevent timeupdate from overriding navigatePhase
+  const navTokenRef = useRef(0);     // Token to handle rapid navigation (only latest wins)
+
+  // ── Active video source management ──────────────────────────
+  // Start with clip URL (fast), switch to full video on navigation
+  const [activeVideoUrl, setActiveVideoUrl] = useState(videoUrl);
+  const [usingFullVideo, setUsingFullVideo] = useState(!isClipPreview);
+  const [navDisabled, setNavDisabled] = useState(false); // Temporary disable during video switch
+
+  // Sync activeVideoUrl when parent changes videoUrl (new phase opened from outside)
+  useEffect(() => {
+    setActiveVideoUrl(videoUrl);
+    setUsingFullVideo(!isClipPreview);
+  }, [videoUrl, isClipPreview]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [showCustomLoading, setShowCustomLoading] = useState(true);
@@ -143,6 +157,35 @@ export default function DockPlayer({
   const [reviewerName, setReviewerName] = useState(() => localStorage.getItem('aitherhub_reviewer_name') || '');
   const [isEditingReviewer, setIsEditingReviewer] = useState(false);
   const [reviewerInput, setReviewerInput] = useState('');
+
+  // ── Robust seekTo helper (handles readyState, retries) ──────
+  const seekTo = useCallback((t) => {
+    const vid = videoRef.current;
+    if (!vid) return;
+
+    const doSeek = () => {
+      try {
+        vid.currentTime = t;
+        vid.playbackRate = playbackRate;
+        if (vid.paused) vid.play().catch(() => {});
+      } catch (e) {
+        console.warn('seekTo failed:', e);
+      }
+    };
+
+    if (vid.readyState >= 1) {
+      doSeek();
+    } else {
+      // Wait for metadata to load before seeking
+      const onMeta = () => {
+        vid.removeEventListener('loadedmetadata', onMeta);
+        doSeek();
+      };
+      vid.addEventListener('loadedmetadata', onMeta);
+      // Fallback: retry after 300ms in case event doesn't fire
+      setTimeout(doSeek, 300);
+    }
+  }, [playbackRate]);
 
   // ── Find current phase based on video currentTime ─────────
   const findPhaseIndex = useCallback(
@@ -188,27 +231,34 @@ export default function DockPlayer({
       setShowCustomLoading(true);
       setIsBuffering(false);
       setCurrentPhaseIndex(-1);
+      setNavDisabled(false);
+      navLockRef.current = false;
+      navTokenRef.current = 0;
+      // Reset video source to prop values for next open
+      setActiveVideoUrl(videoUrl);
+      setUsingFullVideo(!isClipPreview);
     }
   }, [open]);
 
   // ── Setup seek/play when URL or timeStart changes ─────────
   useEffect(() => {
-    if (!open || !videoUrl) return;
+    if (!open || !activeVideoUrl) return;
     const vid = videoRef.current;
     if (!vid) return;
 
-    const urlChanged = videoUrl !== prevVideoUrlRef.current;
+    const urlChanged = activeVideoUrl !== prevVideoUrlRef.current;
     const timeChanged = timeStart !== prevTimeStartRef.current;
 
-    prevVideoUrlRef.current = videoUrl;
+    prevVideoUrlRef.current = activeVideoUrl;
     prevTimeStartRef.current = timeStart;
 
-    if (!urlChanged && timeChanged && !isClipPreview) {
-      // Skip if navigatePhase just set the index (it already handled seek)
-      if (navLockRef.current) return;
-      vid.currentTime = timeStart;
+    // If navigatePhase is handling the seek, skip this effect
+    if (navLockRef.current) return;
+
+    if (!urlChanged && timeChanged) {
+      // Same video, different time → just seek
+      seekTo(timeStart);
       setCurrentPhaseIndex(findPhaseIndex(timeStart));
-      if (vid.paused) vid.play().catch(() => {});
       return;
     }
 
@@ -224,8 +274,10 @@ export default function DockPlayer({
         vid.muted = false;
         vid.playbackRate = playbackRate;
 
-        if (!isClipPreview && timeStart > 0) {
-          vid.currentTime = timeStart;
+        // For clip preview (initial load), start from 0
+        // For full video, seek to timeStart
+        if (usingFullVideo && timeStart > 0) {
+          seekTo(timeStart);
         }
         setCurrentPhaseIndex(findPhaseIndex(timeStart));
 
@@ -278,7 +330,7 @@ export default function DockPlayer({
     return () => {
       vid.removeEventListener("canplay", handleCanPlay);
     };
-  }, [videoUrl, open, timeStart, isClipPreview, findPhaseIndex]);
+  }, [activeVideoUrl, open, timeStart, usingFullVideo, findPhaseIndex, seekTo]);
 
   // ── Timeupdate: track current phase ───────────────────────
   useEffect(() => {
@@ -289,13 +341,16 @@ export default function DockPlayer({
     const onTimeUpdate = () => {
       // Skip timeupdate if navigatePhase just fired (prevents race condition)
       if (navLockRef.current) return;
-      const idx = findPhaseIndex(vid.currentTime);
+      // For clip preview: video.currentTime is relative (0-based),
+      // but phases use absolute time, so add timeStart as offset
+      const absoluteTime = usingFullVideo ? vid.currentTime : vid.currentTime + timeStart;
+      const idx = findPhaseIndex(absoluteTime);
       setCurrentPhaseIndex((prev) => (idx !== prev ? idx : prev));
     };
 
     vid.addEventListener("timeupdate", onTimeUpdate);
     return () => vid.removeEventListener("timeupdate", onTimeUpdate);
-  }, [open, findPhaseIndex]);
+  }, [open, findPhaseIndex, usingFullVideo, timeStart]);
 
   // ── Playback rate change with overlay ─────────────────────
   const handleSpeedChange = useCallback(
@@ -348,38 +403,93 @@ export default function DockPlayer({
   }, [open, handleSpeedChange, currentPhaseIndex, reports1]);
 
   // ── Navigate to prev/next phase ───────────────────────────
+  // On navigation: always switch to full video, seek to target phase start_sec
   const navigatePhase = useCallback(
     (direction) => {
       if (!reports1 || reports1.length === 0) return;
+      if (navDisabled) return; // Prevent rapid clicks during video switch
+
       let targetIdx = currentPhaseIndex + direction;
       if (targetIdx < 0) targetIdx = 0;
       if (targetIdx >= reports1.length) targetIdx = reports1.length - 1;
       if (targetIdx === currentPhaseIndex) return;
 
       const targetPhase = reports1[targetIdx];
+      const targetTime = Number(targetPhase.time_start) || 0;
+
+      // Increment token so only the latest navigation wins
+      const token = ++navTokenRef.current;
 
       // Lock timeupdate to prevent it from overriding our index
       navLockRef.current = true;
       setCurrentPhaseIndex(targetIdx);
 
-      // Always seek video directly (faster, no async race condition)
-      const vid = videoRef.current;
-      if (vid) {
-        vid.currentTime = Number(targetPhase.time_start) || 0;
-        if (vid.paused) vid.play().catch(() => {});
+      // Determine if we need to switch from clip to full video
+      const needsSwitch = !usingFullVideo && fullVideoUrl && fullVideoUrl !== activeVideoUrl;
+
+      if (needsSwitch) {
+        // Switch to full video: disable nav buttons temporarily
+        setNavDisabled(true);
+        setActiveVideoUrl(fullVideoUrl);
+        setUsingFullVideo(true);
+
+        // After video element loads new src, seek to target
+        // We use a short timeout + loadedmetadata listener approach
+        const waitAndSeek = () => {
+          const vid = videoRef.current;
+          if (!vid) return;
+
+          const doSeek = () => {
+            if (token !== navTokenRef.current) return;
+            try {
+              vid.currentTime = targetTime;
+              vid.playbackRate = playbackRate;
+              if (vid.paused) vid.play().catch(() => {});
+            } catch (e) {
+              console.warn('navigatePhase switch seek failed:', e);
+            }
+            setNavDisabled(false);
+            navLockRef.current = false;
+          };
+
+          if (vid.readyState >= 1) {
+            doSeek();
+          } else {
+            const onMeta = () => {
+              vid.removeEventListener('loadedmetadata', onMeta);
+              doSeek();
+            };
+            vid.addEventListener('loadedmetadata', onMeta);
+            // Fallback timeout
+            setTimeout(() => {
+              vid.removeEventListener('loadedmetadata', onMeta);
+              doSeek();
+            }, 2000);
+          }
+        };
+
+        // Wait for React to update the <video src> via state change
+        requestAnimationFrame(() => {
+          requestAnimationFrame(waitAndSeek);
+        });
+      } else {
+        // Already on full video: just seek directly
+        requestAnimationFrame(() => {
+          if (token !== navTokenRef.current) return;
+          seekTo(targetTime);
+        });
+
+        setTimeout(() => {
+          navLockRef.current = false;
+        }, 500);
       }
 
-      // Also notify parent for URL params sync (but don't wait for it)
+      // Notify parent for URL params sync
       if (onPhaseNavigate) {
         onPhaseNavigate(targetPhase);
       }
-
-      // Release lock after a short delay to let video seek settle
-      setTimeout(() => {
-        navLockRef.current = false;
-      }, 500);
     },
-    [currentPhaseIndex, reports1, onPhaseNavigate]
+    [currentPhaseIndex, reports1, onPhaseNavigate, seekTo, navDisabled, usingFullVideo, fullVideoUrl, activeVideoUrl, playbackRate]
   );
 
   // ── Auto-save function (debounced) ──────────────────────────
@@ -452,7 +562,7 @@ export default function DockPlayer({
           onClick={() => setIsMinimized(false)}
         >
           <div className="w-8 h-8 rounded-lg overflow-hidden bg-gray-800 flex-shrink-0">
-            <video ref={videoRef} src={videoUrl} className="w-full h-full object-cover" muted />
+            <video ref={videoRef} src={activeVideoUrl} className="w-full h-full object-cover" muted />
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-xs text-white/80 truncate">
@@ -498,8 +608,9 @@ export default function DockPlayer({
             {currentPhaseIndex >= 0 ? `${currentPhaseIndex + 1} / ${reports1.length}` : `– / ${reports1.length}`}
           </span>
           <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
+            onClick={(e) => { e.stopPropagation(); e.preventDefault(); onClose?.(); }}
+            className="p-1.5 rounded-lg hover:bg-white/10 transition-colors z-50"
+            style={{ position: 'relative', zIndex: 9999 }}
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -512,12 +623,12 @@ export default function DockPlayer({
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* LEFT: Video — 9:16 maximized, centered */}
         <div className="relative bg-black flex items-center justify-center" style={{ width: "45%" }}>
-          {videoUrl ? (
+          {activeVideoUrl ? (
             <>
               <video
                 ref={videoRef}
-                key={videoUrl}
-                src={videoUrl}
+                key={activeVideoUrl}
+                src={activeVideoUrl}
                 controls
                 autoPlay
                 playsInline
@@ -1218,8 +1329,8 @@ export default function DockPlayer({
             {/* Phase navigation */}
             <div className="flex items-center gap-2">
               <button
-                onClick={() => navigatePhase(-1)}
-                disabled={currentPhaseIndex <= 0}
+                onClick={(e) => { e.stopPropagation(); navigatePhase(-1); }}
+                disabled={navDisabled || currentPhaseIndex <= 0}
                 className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-white/10 text-white/70 hover:bg-white/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1231,8 +1342,8 @@ export default function DockPlayer({
                 {currentPhaseIndex >= 0 ? `${currentPhaseIndex + 1} / ${reports1.length}` : `–`}
               </span>
               <button
-                onClick={() => navigatePhase(1)}
-                disabled={currentPhaseIndex >= reports1.length - 1}
+                onClick={(e) => { e.stopPropagation(); navigatePhase(1); }}
+                disabled={navDisabled || currentPhaseIndex >= reports1.length - 1}
                 className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-white/10 text-white/70 hover:bg-white/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
               >
                 次

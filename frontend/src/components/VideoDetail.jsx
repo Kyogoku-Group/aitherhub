@@ -520,8 +520,26 @@ export default function VideoDetail({ videoData }) {
         return;
       }
 
+      // Always resolve full video URL so DockPlayer can switch on navigation
+      let fullUrl = null;
+      if (okPhaseUrl) {
+        // clip was used as primary URL, resolve full video as fallback
+        if (videoData?.preview_url) {
+          const ok = await checkUrl(videoData.preview_url);
+          if (ok) fullUrl = videoData.preview_url;
+        }
+        if (!fullUrl) {
+          try {
+            fullUrl = await VideoService.getDownloadUrl(videoData.id);
+          } catch (err) {
+            console.error('Failed to get full video URL for DockPlayer fallback', err);
+          }
+        }
+      }
+
       const previewDataObj = {
         url,
+        fullVideoUrl: fullUrl || url, // full video URL for navigation
         timeStart: Number(phase.time_start) || 0,
         timeEnd: phase.time_end != null ? Number(phase.time_end) : null,
         isClipPreview: !!okPhaseUrl,
@@ -1571,6 +1589,7 @@ export default function VideoDetail({ videoData }) {
         open={!!previewData}
         onClose={handleCloseDockPlayer}
         videoUrl={previewData?.url}
+        fullVideoUrl={previewData?.fullVideoUrl}
         timeStart={previewData?.timeStart}
         timeEnd={previewData?.timeEnd}
         isClipPreview={previewData?.isClipPreview}
