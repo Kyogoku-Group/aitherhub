@@ -2469,7 +2469,9 @@ async def backfill_sales_moments(
     import requests as http_requests
 
     # workerのcsv_slot_filter, excel_parserをインポート
-    worker_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "worker", "batch")
+    # __file__ = backend/app/api/v1/endpoints/video.py
+    # 5 levels up = repo root, then worker/batch
+    worker_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "worker", "batch")
     sys.path.insert(0, os.path.abspath(worker_path))
 
     try:
