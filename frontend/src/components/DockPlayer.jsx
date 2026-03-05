@@ -132,9 +132,18 @@ export default function DockPlayer({
   const [navDisabled, setNavDisabled] = useState(false); // Temporary disable during video switch
 
   // Sync activeVideoUrl when parent changes videoUrl (new phase opened from outside)
+  // BUT: if we already switched to full video, don't revert to clip URL
   useEffect(() => {
-    setActiveVideoUrl(videoUrl);
-    setUsingFullVideo(!isClipPreview);
+    setUsingFullVideo((prev) => {
+      if (prev) {
+        // Already on full video — keep it, don't revert to clip
+        // Only update activeVideoUrl if fullVideoUrl changed
+        return true;
+      }
+      // Not yet on full video — follow parent's URL
+      setActiveVideoUrl(videoUrl);
+      return !isClipPreview;
+    });
   }, [videoUrl, isClipPreview]);
 
   const [isLoading, setIsLoading] = useState(true);
@@ -675,10 +684,11 @@ export default function DockPlayer({
           </span>
           <button
             onClick={(e) => { e.stopPropagation(); e.preventDefault(); onClose?.(); }}
-            className="p-1.5 rounded-lg hover:bg-white/10 transition-colors z-50"
-            style={{ position: 'relative', zIndex: 9999 }}
+            className="flex items-center justify-center rounded-lg hover:bg-white/10 transition-colors"
+            style={{ position: 'relative', zIndex: 9999, width: 44, height: 44, minWidth: 44, pointerEvents: 'auto' }}
+            title="閉じる (Esc)"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
             </svg>
           </button>
@@ -693,7 +703,6 @@ export default function DockPlayer({
             <>
               <video
                 ref={videoRef}
-                key={activeVideoUrl}
                 src={activeVideoUrl}
                 controls
                 autoPlay
