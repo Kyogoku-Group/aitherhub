@@ -121,6 +121,9 @@ export default function VideoDetail({ videoData }) {
   // humanTags: { [phaseIndex]: string[] } — confirmed/edited tags
   const [humanTags, setHumanTags] = useState({});
 
+  // Sales Moments state (click_spike / order_spike / strong markers)
+  const [salesMoments, setSalesMoments] = useState([]);
+
   // Initialize ratings from existing data
   useEffect(() => {
     if (!videoData?.reports_1) return;
@@ -151,6 +154,23 @@ export default function VideoDetail({ videoData }) {
     }
     if (Object.keys(initial).length > 0) setHumanTags(initial);
   }, [videoData?.reports_1]);
+
+  // Load sales moments when video loads
+  useEffect(() => {
+    if (!videoData?.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await VideoService.getSalesMoments(videoData.id);
+        if (!cancelled && res?.sales_moments) {
+          setSalesMoments(res.sales_moments);
+        }
+      } catch (err) {
+        console.warn('[VideoDetail] Failed to load sales moments:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [videoData?.id]);
 
   // Load existing clip statuses when video loads
   useEffect(() => {
@@ -1551,6 +1571,7 @@ export default function VideoDetail({ videoData }) {
         clipStates={clipStates}
         onClipGenerate={handleClipGeneration}
         videoData={videoData}
+        salesMoments={salesMoments}
       />
     </div>
   );

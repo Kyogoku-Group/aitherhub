@@ -2445,3 +2445,158 @@ async def get_sales_moments(
         # テーブルが存在しない場合など → 空リストを返す（ルールA: フォールバック）
         logger.warning(f"[SALES_MOMENTS] Failed to fetch for {video_id}: {e}")
         return {"sales_moments": [], "count": 0}
+
+
+# =========================================================
+# SALES MOMENTS BACKFILL (POST)
+# =========================================================
+
+@router.post("/{video_id}/sales-moments/backfill")
+async def backfill_sales_moments(
+    video_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    既存動画のsales_momentsをバックフィルする。
+    product-dataのtrend_statsからsales_momentsを検出してDBに保存する。
+    ルールA: 既存APIは触らない。完全に新規エンドポイント。
+    ルールB: 失敗しても既存機能に影響しない。
+    """
+    import sys
+    import os
+    import tempfile
+    import requests as http_requests
+
+    # workerのcsv_slot_filter, excel_parserをインポート
+    worker_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "worker", "batch")
+    sys.path.insert(0, os.path.abspath(worker_path))
+
+    try:
+        from csv_slot_filter import detect_sales_moments
+        from excel_parser import parse_trend_excel
+
+        # 1. 動画のexcel_trend_blob_urlを取得
+        video_sql = text("""
+            SELECT id, upload_type, excel_trend_blob_url, time_offset_seconds
+            FROM videos
+            WHERE id = :video_id
+        """)
+        video_result = await db.execute(video_sql, {"video_id": video_id})
+        video_row = video_result.fetchone()
+        if not video_row:
+            raise HTTPException(status_code=404, detail="Video not found")
+
+        trend_url = video_row[2]  # excel_trend_blob_url
+        time_offset = video_row[3] or 0  # time_offset_seconds
+
+        if not trend_url:
+            return {"status": "skipped", "reason": "no_trend_url", "count": 0}
+
+        # 2. Excelをダウンロードしてパース
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            resp = http_requests.get(trend_url, timeout=30)
+            resp.raise_for_status()
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+
+        try:
+            trend_data = parse_trend_excel(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+
+        if not trend_data:
+            return {"status": "skipped", "reason": "no_trend_data", "count": 0}
+
+        # 3. sales_momentsを検出
+        moments = detect_sales_moments(
+            trends=trend_data,
+            time_offset_seconds=float(time_offset) if time_offset else 0,
+        )
+
+        if not moments:
+            return {"status": "ok", "reason": "no_moments_detected", "count": 0}
+
+        # 3. テーブル作成（IF NOT EXISTS）
+        create_sql = text("""
+            CREATE TABLE IF NOT EXISTS video_sales_moments (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                video_id UUID NOT NULL,
+                time_key VARCHAR(32) NOT NULL,
+                time_sec FLOAT NOT NULL,
+                video_sec FLOAT NOT NULL,
+                moment_type VARCHAR(16) NOT NULL,
+                click_value FLOAT DEFAULT 0,
+                click_delta FLOAT DEFAULT 0,
+                click_sigma_score FLOAT DEFAULT 0,
+                order_value FLOAT DEFAULT 0,
+                order_delta FLOAT DEFAULT 0,
+                gmv_value FLOAT DEFAULT 0,
+                confidence FLOAT DEFAULT 0,
+                reasons TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await db.execute(create_sql)
+
+        # インデックス作成（IF NOT EXISTS）
+        await db.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_vsm_video_id ON video_sales_moments(video_id)"
+        ))
+
+        # 4. 既存データを削除（冪等性）
+        await db.execute(
+            text("DELETE FROM video_sales_moments WHERE video_id = :video_id"),
+            {"video_id": video_id},
+        )
+
+        # 5. 新データを挿入
+        for m in moments:
+            await db.execute(
+                text("""
+                    INSERT INTO video_sales_moments
+                    (video_id, time_key, time_sec, video_sec, moment_type,
+                     click_value, click_delta, click_sigma_score,
+                     order_value, order_delta, gmv_value,
+                     confidence, reasons)
+                    VALUES
+                    (:video_id, :time_key, :time_sec, :video_sec, :moment_type,
+                     :click_value, :click_delta, :click_sigma_score,
+                     :order_value, :order_delta, :gmv_value,
+                     :confidence, :reasons)
+                """),
+                {
+                    "video_id": video_id,
+                    "time_key": m["time_key"],
+                    "time_sec": m["time_sec"],
+                    "video_sec": m["video_sec"],
+                    "moment_type": m["moment_type"],
+                    "click_value": m["click_value"],
+                    "click_delta": m["click_delta"],
+                    "click_sigma_score": m["click_sigma_score"],
+                    "order_value": m["order_value"],
+                    "order_delta": m["order_delta"],
+                    "gmv_value": m["gmv_value"],
+                    "confidence": m["confidence"],
+                    "reasons": json.dumps(m["reasons"], ensure_ascii=False),
+                },
+            )
+
+        await db.commit()
+
+        logger.info(
+            f"[SALES_MOMENTS] Backfilled {len(moments)} moments for video {video_id}"
+        )
+
+        return {
+            "status": "ok",
+            "count": len(moments),
+            "moments": moments,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[SALES_MOMENTS] Backfill failed for {video_id}: {e}")
+        await db.rollback()
+        return {"status": "error", "reason": str(e), "count": 0}

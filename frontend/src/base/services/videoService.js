@@ -982,6 +982,40 @@ class VideoService extends BaseApiService {
       },
     };
   }
+
+  // =========================================================
+  // Sales Moments API
+  // =========================================================
+
+  /**
+   * Get sales moments for a video.
+   * @param {string} videoId
+   * @returns {Promise<{sales_moments: Array, count: number}>}
+   */
+  async getSalesMoments(videoId) {
+    try {
+      const response = await this.get(`/api/v1/videos/${videoId}/sales-moments`);
+      return response || { sales_moments: [], count: 0 };
+    } catch (error) {
+      console.warn('[VideoService] getSalesMoments failed:', error);
+      return { sales_moments: [], count: 0 };
+    }
+  }
+
+  /**
+   * Backfill sales moments for a video (trigger detection from trend_stats).
+   * @param {string} videoId
+   * @returns {Promise<{status: string, count: number, moments?: Array}>}
+   */
+  async backfillSalesMoments(videoId) {
+    try {
+      const response = await this.post(`/api/v1/videos/${videoId}/sales-moments/backfill`);
+      return response || { status: 'error', count: 0 };
+    } catch (error) {
+      console.warn('[VideoService] backfillSalesMoments failed:', error);
+      return { status: 'error', count: 0 };
+    }
+  }
 }
 
 export default new VideoService();

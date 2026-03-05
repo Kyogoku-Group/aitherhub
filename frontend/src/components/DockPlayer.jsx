@@ -114,6 +114,7 @@ export default function DockPlayer({
   clipStates = {},
   onClipGenerate,
   videoData,
+  salesMoments = [],
 }) {
   const videoRef = useRef(null);
   const hasSetupRef = useRef(false);
@@ -547,6 +548,68 @@ export default function DockPlayer({
               動画を読み込み中...
             </div>
           )}
+
+          {/* ─── Sales Moment Timeline Markers ──────────────── */}
+          {salesMoments.length > 0 && (
+            <div className="absolute bottom-0 left-0 right-0 z-20">
+              {/* Label */}
+              <div className="flex items-center gap-2 px-2 py-0.5 bg-black/60 backdrop-blur-sm">
+                <span className="text-[9px] text-white/40 uppercase tracking-wider font-medium">Sales Moments</span>
+                <div className="flex items-center gap-2 ml-auto">
+                  <span className="flex items-center gap-1 text-[8px] text-white/30">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>Strong
+                  </span>
+                  <span className="flex items-center gap-1 text-[8px] text-white/30">
+                    <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>Click
+                  </span>
+                  <span className="flex items-center gap-1 text-[8px] text-white/30">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>Order
+                  </span>
+                </div>
+              </div>
+              {/* Timeline bar */}
+              <div className="relative h-6 bg-black/80 cursor-pointer group"
+                onClick={(e) => {
+                  const vid = videoRef.current;
+                  if (!vid || !vid.duration) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const pct = (e.clientX - rect.left) / rect.width;
+                  vid.currentTime = pct * vid.duration;
+                  if (vid.paused) vid.play().catch(() => {});
+                }}
+              >
+                {/* Background track */}
+                <div className="absolute inset-x-1 top-1/2 -translate-y-1/2 h-1 bg-white/10 rounded-full" />
+                {/* Moment markers */}
+                {salesMoments.map((m, i) => {
+                  const vid = videoRef.current;
+                  const dur = vid?.duration || 1;
+                  const pct = Math.min(100, Math.max(0, (m.video_sec / dur) * 100));
+                  const isStrong = m.moment_type === 'strong';
+                  const isClick = m.moment_type === 'click_spike';
+                  const color = isStrong ? 'bg-red-500' : isClick ? 'bg-blue-500' : 'bg-green-500';
+                  const ringColor = isStrong ? 'ring-red-400/50' : isClick ? 'ring-blue-400/50' : 'ring-green-400/50';
+                  const size = isStrong ? 'w-3 h-3' : 'w-2 h-2';
+                  return (
+                    <button
+                      key={`sm-${i}`}
+                      className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 ${size} ${color} rounded-full ring-2 ${ringColor} hover:scale-150 transition-all duration-150 z-10 group/marker`}
+                      style={{ left: `${pct}%` }}
+                      title={`${m.moment_type} @ ${formatTime(m.video_sec)}\nClick: ${m.click_value ?? 0} | Order: ${m.order_value ?? 0}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const v = videoRef.current;
+                        if (v) {
+                          v.currentTime = m.video_sec;
+                          if (v.paused) v.play().catch(() => {});
+                        }
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* RIGHT: Analysis Panel */}
@@ -620,7 +683,56 @@ export default function DockPlayer({
               </div>
             )}
 
-            {/* ── Product Names ────────────────────────────── */}
+            {/* ── Sales Moments in Current Phase ─────────── */}
+            {(() => {
+              if (!currentPhase || salesMoments.length === 0) return null;
+              const phaseStart = Number(currentPhase.time_start) || 0;
+              const phaseEnd = currentPhase.time_end != null ? Number(currentPhase.time_end) : Infinity;
+              const phaseMoments = salesMoments.filter(m => m.video_sec >= phaseStart && m.video_sec <= phaseEnd);
+              if (phaseMoments.length === 0) return null;
+              return (
+                <div>
+                  <div className="text-[11px] text-white/40 mb-1.5 font-medium flex items-center gap-1.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                    </svg>
+                    Sales Moments ({phaseMoments.length})
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {phaseMoments.map((m, i) => {
+                      const isStrong = m.moment_type === 'strong';
+                      const isClick = m.moment_type === 'click_spike';
+                      const btnColor = isStrong
+                        ? 'bg-red-500/15 text-red-300 border-red-500/25 hover:bg-red-500/25'
+                        : isClick
+                        ? 'bg-blue-500/15 text-blue-300 border-blue-500/25 hover:bg-blue-500/25'
+                        : 'bg-green-500/15 text-green-300 border-green-500/25 hover:bg-green-500/25';
+                      const icon = isStrong ? '⚡' : isClick ? '👆' : '💰';
+                      return (
+                        <button
+                          key={`pm-${i}`}
+                          onClick={() => {
+                            const v = videoRef.current;
+                            if (v) {
+                              v.currentTime = m.video_sec;
+                              if (v.paused) v.play().catch(() => {});
+                            }
+                          }}
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-all duration-150 cursor-pointer ${btnColor}`}
+                          title={`Click: ${m.click_value ?? 0} | Order: ${m.order_value ?? 0}`}
+                        >
+                          <span>{icon}</span>
+                          <span>{formatTime(m.video_sec)}</span>
+                          <span className="text-[9px] opacity-60">{m.moment_type === 'strong' ? 'STRONG' : m.moment_type === 'click_spike' ? 'CLICK' : 'ORDER'}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
+               {/* ── Product Names ──────────────────────────── */}
             {productNames.length > 0 && (
               <div>
                 <div className="text-[11px] text-white/40 mb-1.5 font-medium">商品</div>

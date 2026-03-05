@@ -675,6 +675,35 @@ def detect_sales_moments(
     order_key = _find_key(sample, KPI_ALIASES.get("order_count", []))
     gmv_key = _find_key(sample, KPI_ALIASES.get("gmv", []))
 
+    # --- 「率」カラム誤マッチ防止 ---
+    # 「注文率（SKU注文数）」のように名前に「率」「rate」を含むカラムが
+    # order_count にマッチしてしまう場合、値が 0〜1 の割合であれば除外する。
+    if order_key:
+        order_key_lower = order_key.lower()
+        rate_indicators = ["率", "rate", "ratio", "pct", "percentage"]
+        if any(ri in order_key_lower for ri in rate_indicators):
+            # 値が全て 0〜1 の範囲なら割合カラムと判断して除外
+            order_vals = [_safe_float(t.get(order_key)) for t in trends]
+            order_vals = [v for v in order_vals if v is not None]
+            if order_vals and all(0 <= v <= 1 for v in order_vals):
+                logger.warning(
+                    "[SALES_MOMENT] order_key '%s' appears to be a rate column "
+                    "(values in 0-1 range). Falling back to alternative.",
+                    order_key,
+                )
+                # フォールバック: SKU注文数、created_orders など整数系を探す
+                fallback_keys = [
+                    "SKU注文数", "SKU订单数", "SKU訂單數",
+                    "seller_screen_live_core_data_created_orders",
+                    "live_workbench_metric_orders_new",
+                    "orders_metric_name_short_ui",
+                ]
+                order_key = _find_key(sample, fallback_keys)
+                if order_key:
+                    logger.info("[SALES_MOMENT] Fallback order_key: %s", order_key)
+                else:
+                    logger.warning("[SALES_MOMENT] No valid order column found after fallback")
+
     if not click_key and not order_key:
         logger.warning("[SALES_MOMENT] No click or order columns found")
         return []
@@ -749,14 +778,18 @@ def detect_sales_moments(
                 prev_order = timed[i - 1]["order"]
                 order_delta = t["order"] - prev_order
                 if prev_order > 0 and order_delta / prev_order >= order_pct_threshold:
-                    is_order_spike = True
-                    reasons.append(f"order_pct=+{order_delta/prev_order*100:.0f}%")
-                elif prev_order == 0 and t["order"] > 0:
+                    # 絶対数が少なすぎる場合は誤検知を防ぐ（最低2件以上の増加）
+                    if order_delta >= 2:
+                        is_order_spike = True
+                        reasons.append(f"order_pct=+{order_delta/prev_order*100:.0f}%")
+                elif prev_order == 0 and t["order"] >= 3:
+                    # ゼロからの立ち上がりは3件以上で検出
                     is_order_spike = True
                     reasons.append("order_from_zero")
             elif t["order"] > 0:
-                is_order_spike = True
-                reasons.append("order_first_slot")
+                # 最初のスロットは配信開始の立ち上がりであり、
+                # スパイクではないため除外する。
+                pass  # order_first_slot は誤検知が多いため無視
 
         # --- moment_type 判定 ---
         if not is_click_spike and not is_order_spike:
