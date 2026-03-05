@@ -63,7 +63,7 @@ async def backfill_all(video_id: str = None, limit: int = None):
     async with AsyncSessionLocal() as session:
         # Get videos with excel_trend_blob_url
         sql = """
-            SELECT id, filename, excel_trend_blob_url, time_offset_seconds
+            SELECT id, original_filename, excel_trend_blob_url, time_offset_seconds
             FROM videos
             WHERE status = 'completed'
               AND excel_trend_blob_url IS NOT NULL
@@ -85,7 +85,7 @@ async def backfill_all(video_id: str = None, limit: int = None):
 
         for v in videos:
             vid = str(v.id)
-            filename = v.filename or "unknown"
+            filename = v.original_filename or "unknown"
             excel_url = v.excel_trend_blob_url
             time_offset = float(v.time_offset_seconds) if v.time_offset_seconds else 0.0
 
