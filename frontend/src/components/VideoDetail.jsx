@@ -467,29 +467,25 @@ export default function VideoDetail({ videoData }) {
 
     setPreviewLoading(true);
     try {
-      const checkUrl = async (url, timeout = 5000) => {
+      // Quick URL check – treats any non-2xx (including 409 Conflict from Azure CDN) as failure
+      const checkUrl = async (url, timeout = 3000) => {
         try {
           const controller = new AbortController();
           const id = setTimeout(() => controller.abort(), timeout);
           const res = await fetch(url, { method: 'HEAD', mode: 'cors', signal: controller.signal });
           clearTimeout(id);
-          return res.status === 200 || res.status === 206;
+          if (res.ok || res.status === 206) return true;
+          console.warn(`checkUrl HEAD ${res.status} for`, url);
+          return false;
         } catch {
-          try {
-            const controller2 = new AbortController();
-            const id2 = setTimeout(() => controller2.abort(), timeout);
-            const res2 = await fetch(url, { method: 'GET', headers: { Range: 'bytes=0-0' }, mode: 'cors', signal: controller2.signal });
-            clearTimeout(id2);
-            return res2.status === 206 || res2.status === 200;
-          } catch {
-            return false;
-          }
+          return false;
         }
       };
 
       let url = null;
       let okPhaseUrl = false;
 
+      // 1) Try clip URL (fast path)
       if (phase?.video_clip_url) {
         const ok = await checkUrl(phase.video_clip_url);
         if (ok) {
@@ -498,23 +494,22 @@ export default function VideoDetail({ videoData }) {
         }
       }
 
-      if (!url) {
-        // Prefer compressed preview URL if available (much lighter for playback)
-        if (videoData?.preview_url) {
-          const ok = await checkUrl(videoData.preview_url);
-          if (ok) {
-            url = videoData.preview_url;
-            console.log('Using compressed preview URL for playback');
-          }
+      // 2) Fallback: compressed preview URL
+      if (!url && videoData?.preview_url) {
+        const ok = await checkUrl(videoData.preview_url);
+        if (ok) {
+          url = videoData.preview_url;
+          console.log('Using compressed preview URL for playback');
         }
-        // Fallback to original download URL
-        if (!url) {
-          try {
-            const downloadUrl = await VideoService.getDownloadUrl(videoData.id);
-            url = downloadUrl;
-          } catch (err) {
-            console.error('Failed to get backend download URL', err);
-          }
+      }
+
+      // 3) Fallback: backend download URL (always works, generates fresh SAS)
+      if (!url) {
+        try {
+          const downloadUrl = await VideoService.getDownloadUrl(videoData.id);
+          if (downloadUrl) url = downloadUrl;
+        } catch (err) {
+          console.error('Failed to get backend download URL', err);
         }
       }
 
@@ -523,10 +518,9 @@ export default function VideoDetail({ videoData }) {
         return;
       }
 
-      // Always resolve full video URL so DockPlayer can switch on navigation
+      // Resolve full video URL so DockPlayer can switch on navigation
       let fullUrl = null;
       if (okPhaseUrl) {
-        // clip was used as primary URL, resolve full video as fallback
         if (videoData?.preview_url) {
           const ok = await checkUrl(videoData.preview_url);
           if (ok) fullUrl = videoData.preview_url;
