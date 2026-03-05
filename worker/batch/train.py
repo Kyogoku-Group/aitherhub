@@ -274,10 +274,14 @@ def train_and_evaluate(X, y, w, feature_names, target, output_dir):
         lgbm_model = lgb.LGBMClassifier(**lgbm_params)
 
         try:
-            y_pred_lgbm = cross_val_predict(
-                lgbm_model, X, y, cv=cv, method="predict_proba",
-                fit_params={"sample_weight": w}
-            )[:, 1]
+            # Manual cross-validation to support sample_weight
+            y_pred_lgbm = np.zeros(len(y), dtype=np.float64)
+            for train_idx, val_idx in cv.split(X, y):
+                X_tr, X_val = X[train_idx], X[val_idx]
+                y_tr, w_tr = y[train_idx], w[train_idx]
+                fold_model = lgb.LGBMClassifier(**lgbm_params)
+                fold_model.fit(X_tr, y_tr, sample_weight=w_tr)
+                y_pred_lgbm[val_idx] = fold_model.predict_proba(X_val)[:, 1]
             auc_lgbm = roc_auc_score(y, y_pred_lgbm)
             y_pred_binary_lgbm = (y_pred_lgbm >= 0.5).astype(int)
             prec_lgbm = precision_score(y, y_pred_binary_lgbm, zero_division=0)
