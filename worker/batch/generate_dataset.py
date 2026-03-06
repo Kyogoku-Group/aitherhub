@@ -7,6 +7,11 @@
   ④ 正例:負例 = 1:3 サンプリング
   ⑤ 情報リーク防止: GMV/注文数/クリック数は特徴量に入れない
 
+v5 変更点 (confidence weight):
+  - sample_weightにconfidence-based重みを反映
+    csv=1.0, purchase_popup=0.9, product_viewers_popup=0.75, viewer/comment_spike=0.5
+  - confidence_weightフィールド追加
+
 v4 変更点 (screen moment 統合):
   - video_sales_momentsのsourceカラムに対応 (csv / screen)
   - screen momentの教師信号をラベル計算に統合:
@@ -655,10 +660,32 @@ async def generate(output_dir: str, video_id=None, user_id=None):
         with open(output_path, "w", encoding="utf-8") as f:
             for rec in dataset:
                 # Add sample_weight for training
+                # Confidence-based weight: csv=1.0, screen varies by type
+                # purchase_popup=0.9, product_viewers_popup=0.75, viewer/comment_spike=0.5
                 if rec[y_key] == 1:
-                    rec["sample_weight"] = rec[w_key]
+                    base_w = rec[w_key]  # distance-decay weight
+                    source = rec.get("moment_source", "none")
+                    if source == "screen":
+                        # Screen-only: apply confidence discount
+                        if rec.get("screen_purchase_popup"):
+                            confidence_w = 0.9
+                        elif rec.get("screen_product_viewers"):
+                            confidence_w = 0.75
+                        else:
+                            confidence_w = 0.5  # viewer_spike / comment_spike
+                        rec["sample_weight"] = base_w * confidence_w
+                        rec["confidence_weight"] = confidence_w
+                    elif source == "both":
+                        # Both sources: csv dominates, slight boost
+                        rec["sample_weight"] = base_w * 1.0
+                        rec["confidence_weight"] = 1.0
+                    else:
+                        # CSV only: full weight
+                        rec["sample_weight"] = base_w
+                        rec["confidence_weight"] = 1.0
                 else:
                     rec["sample_weight"] = 1.0
+                    rec["confidence_weight"] = 1.0
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
         stats[target] = {

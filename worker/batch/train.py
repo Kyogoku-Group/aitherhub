@@ -97,7 +97,6 @@ KNOWN_EVENT_TYPES = [
     "CTA", "OBJECTION", "SOCIAL_PROOF", "URGENCY",
     "EMPATHY", "EDUCATION", "CHAT", "TRANSITION", "CLOSING", "UNKNOWN",
 ]
-
 MODEL_VERSION = 5
 DATE_TAG = datetime.now().strftime("%Y%m%d")
 
@@ -853,8 +852,50 @@ def build_manifest(all_metrics, output_dir, feature_names, dataset_paths):
     return manifest
 
 
+def filter_records_by_source(records, source_filter):
+    """
+    Filter dataset records by moment source.
+
+    source_filter:
+      'all'    → use all records (default, mixed training)
+      'csv'    → only records where moment_source is 'csv' or 'both' or 'none'
+                 (i.e., include all, but positives must come from csv)
+      'screen' → only records where moment_source is 'screen' or 'both' or 'none'
+                 (i.e., include all, but positives must come from screen)
+      'csv_only'    → strict: positive only from csv source
+      'screen_only' → strict: positive only from screen source
+    """
+    if source_filter == "all":
+        return records
+
+    filtered = []
+    for r in records:
+        src = r.get("moment_source", "none")
+        is_positive = any(r.get(f"y_{t}", 0) == 1 for t in ["click", "order", "strong"])
+
+        if not is_positive:
+            # Always include negatives
+            filtered.append(r)
+        elif source_filter == "csv_only":
+            if src in ("csv", "both"):
+                filtered.append(r)
+        elif source_filter == "screen_only":
+            if src in ("screen", "both"):
+                filtered.append(r)
+        elif source_filter == "csv":
+            if src != "screen":  # csv, both, none
+                filtered.append(r)
+        elif source_filter == "screen":
+            if src != "csv":  # screen, both, none
+                filtered.append(r)
+        else:
+            filtered.append(r)
+
+    return filtered
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Train LCJ AI prediction model v4")
+    parser = argparse.ArgumentParser(description="Train LCJ AI prediction model v5")
     parser.add_argument("--input", "-i", default=None,
                         help="Input JSONL dataset file (single target)")
     parser.add_argument("--input-dir", default=None,
@@ -864,7 +905,12 @@ def main():
                         help="Target label (click or order)")
     parser.add_argument("--output-dir", "-o", default="/tmp/models/",
                         help="Output directory for models and metrics")
+    parser.add_argument("--source-filter", default="all",
+                        choices=["all", "csv", "screen", "csv_only", "screen_only"],
+                        help="Filter training data by moment source (default: all = mixed)")
     args = parser.parse_args()
+
+    print(f"[train] Source filter: {args.source_filter}")
 
     all_results = {}
     feature_names_final = None
@@ -881,6 +927,10 @@ def main():
             print(f"[train] Loading {target} dataset from: {input_path}")
             records = load_jsonl(input_path)
             print(f"[train] Loaded {len(records)} records")
+
+            # Apply source filter
+            records = filter_records_by_source(records, args.source_filter)
+            print(f"[train] After source filter '{args.source_filter}': {len(records)} records")
 
             X, y, w, group_ids, feature_names, unique_vids, video_ids_raw = extract_features(records, target=target)
             feature_names_final = feature_names
@@ -899,6 +949,11 @@ def main():
             sys.exit(1)
 
         records = load_jsonl(args.input)
+
+        # Apply source filter
+        records = filter_records_by_source(records, args.source_filter)
+        print(f"[train] After source filter '{args.source_filter}': {len(records)} records")
+
         X, y, w, group_ids, feature_names, unique_vids, video_ids_raw = extract_features(records, target=args.target)
         feature_names_final = feature_names
         dataset_paths[args.target] = args.input
@@ -916,6 +971,7 @@ def main():
     # Build manifest
     if feature_names_final and all_results:
         manifest = build_manifest(all_results, args.output_dir, feature_names_final, dataset_paths)
+        manifest["source_filter"] = args.source_filter
 
     # Summary
     print(f"\n{'='*70}")
