@@ -1,0 +1,32 @@
+/* AitherHub Minibar - Common Styles */
+
+@keyframes aitherhub-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes aitherhub-slide-in {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+#aitherhub-dashboard-minibar,
+#aitherhub-live-minibar {
+  animation: aitherhub-slide-in 0.3s ease-out;
+}
+
+/* Mark button hover effect */
+.aitherhub-mark-btn:hover {
+  background: #FF1744 !important;
+  transform: scale(1.05);
+}
+
+.aitherhub-mark-btn:active {
+  transform: scale(0.95);
+}
