@@ -302,13 +302,13 @@ async def get_video_list(
                 SELECT video_id, COUNT(*) AS phase_count
                 FROM video_phases
                 GROUP BY video_id
-            ) ph ON ph.video_id = CAST(v.id AS TEXT)
+            ) ph ON CAST(ph.video_id AS UUID) = v.id
             LEFT JOIN (
                 SELECT video_id,
                        COUNT(*) AS moment_count
                 FROM video_sales_moments
                 GROUP BY video_id
-            ) sm ON sm.video_id = CAST(v.id AS TEXT)
+            ) sm ON CAST(sm.video_id AS UUID) = v.id
             LEFT JOIN (
                 SELECT video_id,
                        COUNT(CASE WHEN user_rating IS NOT NULL THEN 1 END) AS rating_count,
@@ -316,8 +316,8 @@ async def get_video_list(
                        COUNT(CASE WHEN user_comment IS NOT NULL AND user_comment != '' THEN 1 END) AS comment_count
                 FROM video_phases
                 GROUP BY video_id
-            ) hl ON hl.video_id = CAST(v.id AS TEXT)
-            LEFT JOIN video_processing_state vps ON vps.video_id = CAST(v.id AS TEXT)
+            ) hl ON CAST(hl.video_id AS UUID) = v.id
+            LEFT JOIN video_processing_state vps ON CAST(vps.video_id AS UUID) = v.id
             {where_clause}
             ORDER BY v.created_at DESC
             LIMIT :lim OFFSET :off
