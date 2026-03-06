@@ -90,6 +90,7 @@ from best_video_pipeline import process_best_video
 
 from excel_parser import load_excel_data, match_sales_to_phase, build_phase_stats_from_csv
 from csv_slot_filter import get_important_time_ranges, filter_phases_by_importance, detect_sales_moments
+from screen_moment_extractor import detect_screen_moments
 from video_status import VideoStatus
 from video_compressor import compress_and_replace
 from product_detection_pipeline import detect_product_timeline
@@ -528,9 +529,11 @@ def main():
         # =========================
         excel_data = None
         time_offset_seconds = 0
+        is_screen_recording = True  # default: screen recording
         try:
             excel_urls = get_video_excel_urls_sync(video_id)
             if excel_urls and excel_urls.get("upload_type") == "clean_video":
+                is_screen_recording = False
                 logger.info("[EXCEL] Clean video detected, loading Excel data...")
                 time_offset_seconds = excel_urls.get("time_offset_seconds", 0)
                 logger.info("[EXCEL] Time offset for this video: %.1f seconds", time_offset_seconds)
@@ -1032,14 +1035,14 @@ def main():
             logger.info("[EXCEL] Product data available: %d products", len(excel_data["products"]))
 
         # =========================
-        # STEP 5.6 – SALES MOMENT DETECTION (Feature Flag)
+        # STEP 5.6 – SALES MOMENT DETECTION: CSV (Feature Flag)
         # =========================
         # ルールB: 失敗しても全体は成功扱い
         # ルールC: ENABLE_SALES_MOMENT=true で有効化
         enable_sales_moment = os.environ.get("ENABLE_SALES_MOMENT", "true").lower() == "true"
         if enable_sales_moment and excel_data and excel_data.get("has_trend_data"):
             try:
-                logger.info("=== STEP 5.6 – SALES MOMENT DETECTION ===")
+                logger.info("=== STEP 5.6 – SALES MOMENT DETECTION (CSV) ===")
                 ensure_sales_moments_table_sync()
 
                 moments = detect_sales_moments(
@@ -1051,22 +1054,64 @@ def main():
                     bulk_insert_sales_moments_sync(
                         video_id=str(video_id),
                         moments=moments,
+                        source="csv",
                     )
                     logger.info(
-                        "[SALES_MOMENT] Saved %d moments for video %s",
+                        "[SALES_MOMENT] Saved %d CSV moments for video %s",
                         len(moments), video_id,
                     )
                 else:
-                    logger.info("[SALES_MOMENT] No sales moments detected for video %s", video_id)
+                    logger.info("[SALES_MOMENT] No CSV sales moments detected for video %s", video_id)
             except Exception as e:
                 # ルールB: 失敗しても全体は成功扱い
                 logger.warning(
-                    "[SALES_MOMENT] ERROR_TYPE=SALES_MOMENT_FAIL – %s (video %s). "
+                    "[SALES_MOMENT] ERROR_TYPE=CSV_SALES_MOMENT_FAIL – %s (video %s). "
                     "Continuing with remaining pipeline.",
                     e, video_id,
                 )
         elif not enable_sales_moment:
             logger.info("[SALES_MOMENT] Feature flag ENABLE_SALES_MOMENT is disabled, skipping")
+
+        # =========================
+        # STEP 5.7 – SCREEN MOMENT EXTRACTION (screen_recording only)
+        # =========================
+        # ルールB: 失敗しても全体は成功扱い
+        # ルールD: upload_type != clean_video の場合のみ実行
+        enable_screen_moment = os.environ.get("ENABLE_SCREEN_MOMENT", "true").lower() == "true"
+        if enable_sales_moment and enable_screen_moment and is_screen_recording:
+            try:
+                logger.info("=== STEP 5.7 – SCREEN MOMENT EXTRACTION ===")
+                ensure_sales_moments_table_sync()
+
+                screen_moments = detect_screen_moments(
+                    frame_dir=frame_dir,
+                    keyframes=keyframes,
+                    fps=1.0,
+                    sample_interval_sec=5.0,
+                    max_frames=30,
+                )
+
+                if screen_moments:
+                    bulk_insert_sales_moments_sync(
+                        video_id=str(video_id),
+                        moments=screen_moments,
+                        source="screen",
+                    )
+                    logger.info(
+                        "[SCREEN_MOMENT] Saved %d screen moments for video %s",
+                        len(screen_moments), video_id,
+                    )
+                else:
+                    logger.info("[SCREEN_MOMENT] No screen moments detected for video %s", video_id)
+            except Exception as e:
+                # ルールB: 失敗しても全体は成功扱い
+                logger.warning(
+                    "[SCREEN_MOMENT] ERROR_TYPE=SCREEN_MOMENT_FAIL – %s (video %s). "
+                    "Continuing with remaining pipeline.",
+                    e, video_id,
+                )
+        elif is_screen_recording and not enable_screen_moment:
+            logger.info("[SCREEN_MOMENT] Feature flag ENABLE_SCREEN_MOMENT is disabled, skipping")
 
         # =========================
         # STEP 6 – PHASE DESCRIPTION

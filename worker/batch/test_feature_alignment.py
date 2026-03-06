@@ -1,11 +1,12 @@
 """
-test_feature_alignment.py  –  generate_dataset.py v3 ↔ train.py v5 整合性テスト
+test_feature_alignment.py  –  generate_dataset.py v4 ↔ train.py v5 整合性テスト
 ================================================================================
 ドライランで以下を検証:
   1. generate_dataset.py が出力するJSONLレコードのキーが train.py の特徴量定義と一致
   2. train.py extract_features() が正しい次元の行列を生成
   3. predict.py _record_to_features() が同じ次元を生成
-  4. 特徴量名の一覧を出力
+  4. compute_labels_v2 が CSV / screen / mixed moments を正しく処理
+  5. 特徴量名の一覧を出力
 """
 
 import json
@@ -29,6 +30,8 @@ from generate_dataset import (
     extract_keyword_flags, extract_comment_keyword_flags,
     extract_text_features, extract_human_tag_features,
     extract_comment_features,
+    compute_labels_v2,
+    build_moments_index,
 )
 
 
@@ -84,7 +87,7 @@ def make_dummy_record():
         "text": desc[:200],
         "comment_text": comment[:200],
 
-        # Labels
+        # Labels (v4 – includes source fields)
         "y_click": 1,
         "y_order": 0,
         "y_strong": 0,
@@ -92,6 +95,11 @@ def make_dummy_record():
         "weight_order": 0.0,
         "nearest_click_sec": 15.3,
         "nearest_order_sec": None,
+        "moment_source": "csv",
+        "has_screen_moment": 0,
+        "has_csv_moment": 1,
+        "screen_purchase_popup": 0,
+        "screen_product_viewers": 0,
         "sample_weight": 0.85,
     }
     return record
@@ -200,23 +208,151 @@ def test_feature_alignment():
     assert X2[0, hr_idx] == 0.0
     print(f"  ✅ Empty human review handled correctly (all zeros)")
 
-    # 8. Print full feature list
-    print(f"\n[6] Complete feature list ({len(feature_names)} features):")
-    print(f"  {'#':>3}  {'Feature Name':40s}  {'Value':>8}")
-    print(f"  {'─'*55}")
-    for i, fname in enumerate(feature_names):
-        print(f"  {i+1:>3}  {fname:40s}  {X[0, i]:>8.2f}")
+    return True
 
+
+def test_compute_labels_v2():
+    """Test compute_labels_v2 with CSV, screen, and mixed moments."""
     print(f"\n{'=' * 70}")
-    print(f"ALL TESTS PASSED ✅")
-    print(f"  Model version: v{MODEL_VERSION}")
-    print(f"  Total features: {len(feature_names)}")
-    print(f"  Human review features: {len(HUMAN_TAG_FEATURES) + len(COMMENT_KEYWORD_FEATURES) + 4}")
+    print(f"compute_labels_v2 Tests — CSV / Screen / Mixed")
     print(f"{'=' * 70}")
+
+    # ── CSV moments ──
+    print(f"\n[A] CSV moments:")
+    csv_moments = [
+        {"video_sec": 100.0, "moment_type": "click_spike",
+         "moment_type_detail": "click_spike", "source": "csv", "confidence": 0.9},
+        {"video_sec": 200.0, "moment_type": "order_spike",
+         "moment_type_detail": "order_spike", "source": "csv", "confidence": 0.8},
+        {"video_sec": 300.0, "moment_type": "strong",
+         "moment_type_detail": "strong", "source": "csv", "confidence": 0.95},
+    ]
+
+    # Note: order_spike at 200s is within ±150s of phase mid (100s), so y_order=1
+    labels = compute_labels_v2(90.0, 110.0, csv_moments)
+    assert labels["y_click"] == 1
+    assert labels["y_order"] == 1  # order_spike(200s) within 150s window of phase mid(100s)
+    assert labels["moment_source"] == "csv"
+    assert labels["has_csv_moment"] == 1
+    assert labels["has_screen_moment"] == 0
+    print(f"  ✅ click_spike: y_click=1, y_order=1 (order within window), source=csv")
+
+    labels2 = compute_labels_v2(290.0, 310.0, csv_moments)
+    assert labels2["y_click"] == 1
+    assert labels2["y_order"] == 1
+    assert labels2["y_strong"] == 1
+    assert labels2["moment_source"] == "csv"
+    print(f"  ✅ strong: y_click=1, y_order=1, y_strong=1")
+
+    labels3 = compute_labels_v2(500.0, 510.0, csv_moments)
+    assert labels3["y_click"] == 0
+    assert labels3["y_order"] == 0
+    assert labels3["moment_source"] == "none"
+    print(f"  ✅ no match: y_click=0, y_order=0, source=none")
+
+    # ── Screen moments ──
+    print(f"\n[B] Screen moments:")
+    # Use wide spacing (>300s apart) so moments don't overlap each other's ±150s windows
+    screen_moments = [
+        {"video_sec": 100.0, "moment_type": "strong",
+         "moment_type_detail": "purchase_popup", "source": "screen", "confidence": 0.85},
+        {"video_sec": 500.0, "moment_type": "click",
+         "moment_type_detail": "product_viewers_popup", "source": "screen", "confidence": 0.7},
+        {"video_sec": 900.0, "moment_type": "click",
+         "moment_type_detail": "viewer_spike", "source": "screen", "confidence": 0.6},
+        {"video_sec": 1300.0, "moment_type": "click",
+         "moment_type_detail": "comment_spike", "source": "screen", "confidence": 0.5},
+    ]
+
+    labels4 = compute_labels_v2(95.0, 105.0, screen_moments)
+    assert labels4["y_click"] == 1
+    assert labels4["y_order"] == 1
+    assert labels4["y_strong"] == 1
+    assert labels4["moment_source"] == "screen"
+    assert labels4["has_screen_moment"] == 1
+    assert labels4["screen_purchase_popup"] == 1
+    print(f"  ✅ purchase_popup: y_click=1, y_order=1, y_strong=1, screen_purchase=1")
+
+    labels5 = compute_labels_v2(495.0, 505.0, screen_moments)
+    assert labels5["y_click"] == 1
+    assert labels5["y_order"] == 0  # no order/strong nearby
+    assert labels5["y_strong"] == 0
+    assert labels5["screen_product_viewers"] == 1
+    print(f"  ✅ product_viewers_popup: y_click=1, y_order=0, screen_viewers=1")
+
+    labels6 = compute_labels_v2(895.0, 905.0, screen_moments)
+    assert labels6["y_click"] == 1
+    assert labels6["y_order"] == 0
+    print(f"  ✅ viewer_spike: y_click=1, y_order=0")
+
+    labels7 = compute_labels_v2(1295.0, 1305.0, screen_moments)
+    assert labels7["y_click"] == 1
+    assert labels7["y_order"] == 0
+    print(f"  ✅ comment_spike: y_click=1, y_order=0")
+
+    # ── Mixed moments ──
+    print(f"\n[C] Mixed CSV + Screen moments:")
+    mixed_moments = [
+        {"video_sec": 100.0, "moment_type": "click_spike",
+         "moment_type_detail": "click_spike", "source": "csv", "confidence": 0.9},
+        {"video_sec": 105.0, "moment_type": "strong",
+         "moment_type_detail": "purchase_popup", "source": "screen", "confidence": 0.85},
+    ]
+
+    labels8 = compute_labels_v2(95.0, 110.0, mixed_moments)
+    assert labels8["y_click"] == 1
+    assert labels8["y_order"] == 1
+    assert labels8["y_strong"] == 1
+    assert labels8["moment_source"] == "both"
+    assert labels8["has_csv_moment"] == 1
+    assert labels8["has_screen_moment"] == 1
+    print(f"  ✅ Mixed: y_click=1, y_order=1, y_strong=1, source=both")
+
+    return True
+
+
+def test_build_moments_index():
+    """Test build_moments_index preserves source information."""
+    print(f"\n{'=' * 70}")
+    print(f"build_moments_index Tests")
+    print(f"{'=' * 70}")
+
+    class MockRow:
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    rows = [
+        MockRow(video_id="v1", video_sec=100.0, moment_type="click_spike",
+                moment_type_detail="click_spike", source="csv", confidence=0.9),
+        MockRow(video_id="v1", video_sec=200.0, moment_type="strong",
+                moment_type_detail="purchase_popup", source="screen", confidence=0.85),
+        MockRow(video_id="v2", video_sec=50.0, moment_type="click",
+                moment_type_detail="viewer_spike", source="screen", confidence=0.6),
+    ]
+
+    idx = build_moments_index(rows)
+    assert "v1" in idx
+    assert len(idx["v1"]) == 2
+    assert idx["v1"][0]["source"] == "csv"
+    assert idx["v1"][1]["source"] == "screen"
+    assert idx["v1"][1]["moment_type_detail"] == "purchase_popup"
+    assert "v2" in idx
+    assert idx["v2"][0]["source"] == "screen"
+    print(f"  ✅ build_moments_index: {len(idx)} videos, source preserved")
 
     return True
 
 
 if __name__ == "__main__":
-    success = test_feature_alignment()
-    sys.exit(0 if success else 1)
+    ok1 = test_feature_alignment()
+    ok2 = test_compute_labels_v2()
+    ok3 = test_build_moments_index()
+
+    print(f"\n{'=' * 70}")
+    if ok1 and ok2 and ok3:
+        print(f"ALL TESTS PASSED ✅")
+    else:
+        print(f"SOME TESTS FAILED ❌")
+        sys.exit(1)
+    print(f"{'=' * 70}")

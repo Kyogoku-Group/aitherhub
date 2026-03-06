@@ -1,5 +1,4 @@
-"""
-generate_dataset.py  –  AI学習用データセット生成ジョブ v3
+"""generate_dataset.py  –  AI学習用データセット生成ジョブ v4
 =====================================================
 仕様:
   ① 目的変数: y_click (click_spike窓重複), y_order (order_spike窓重複), y_strong
@@ -7,6 +6,18 @@ generate_dataset.py  –  AI学習用データセット生成ジョブ v3
   ③ event × sales_moment は window ±150s で結合、距離減衰 weight
   ④ 正例:負例 = 1:3 サンプリング
   ⑤ 情報リーク防止: GMV/注文数/クリック数は特徴量に入れない
+
+v4 変更点 (screen moment 統合):
+  - video_sales_momentsのsourceカラムに対応 (csv / screen)
+  - screen momentの教師信号をラベル計算に統合:
+    purchase_popup → y_strong + y_order (最強信号)
+    product_viewers_popup → y_click (興味信号)
+    viewer_spike → y_click
+    comment_spike → y_click
+  - moment_sourceメタデータ追加 ('csv' / 'screen' / 'both' / 'none')
+  - has_screen_moment, has_csv_moment フラグ追加
+  - screen_purchase_popup, screen_product_viewers フラグ追加
+  - dataset_stats.jsonにmoment_sources集計追加
 
 v3 変更点:
   - human_sales_tags を行動タグ(8) + 販売心理タグ(14) の one-hot 特徴量に展開
@@ -17,7 +28,7 @@ v3 変更点:
 
 出力: train_click.jsonl / train_order.jsonl
 
-特徴量 (v3):
+特徴量 (v4):
   テキスト系: keyword flags (円/¥/割引/今だけ/残り/リンク/カート/タップ etc.)
               数字出現フラグ, text_length
   構造系:     event_type, event_duration, event_position_min
@@ -219,7 +230,7 @@ async def fetch_phases(session, video_id=None, user_id=None):
 
 
 async def fetch_sales_moments(session, video_id=None):
-    """Fetch all sales moments."""
+    """Fetch all sales moments (both csv and screen sources)."""
     params = {}
     where = ""
     if video_id:
@@ -227,7 +238,10 @@ async def fetch_sales_moments(session, video_id=None):
         params["video_id"] = video_id
 
     sql = text(f"""
-        SELECT video_id, video_sec, moment_type, confidence
+        SELECT video_id, video_sec, moment_type,
+               COALESCE(moment_type_detail, moment_type) as moment_type_detail,
+               COALESCE(source, 'csv') as source,
+               confidence
         FROM video_sales_moments
         {where}
         ORDER BY video_id, video_sec
@@ -276,12 +290,18 @@ async def fetch_video_durations(session, video_ids: list):
 # ── Index Builders ──
 
 def build_moments_index(moments_rows):
-    """Build {video_id: [moment_dict, ...]}."""
+    """Build {video_id: [moment_dict, ...]}.
+
+    Each moment dict now includes source and moment_type_detail
+    for csv/screen distinction in output.
+    """
     idx = defaultdict(list)
     for r in moments_rows:
         idx[str(r.video_id)].append({
             "video_sec": float(r.video_sec),
             "moment_type": r.moment_type,
+            "moment_type_detail": getattr(r, 'moment_type_detail', r.moment_type),
+            "source": getattr(r, 'source', 'csv'),
             "confidence": r.confidence,
         })
     return dict(idx)
@@ -303,14 +323,23 @@ def compute_labels_v2(phase_start: float, phase_end: float, moments: list):
     """
     Compute labels with distance-weighted scoring.
 
+    Supports both CSV and screen sources:
+      - CSV moments: click_spike, order_spike, strong
+      - Screen moments: purchase_popup, product_viewers_popup, viewer_spike, comment_spike
+
     Returns:
-      y_click: 1 if click_spike or strong within ±MOMENT_WINDOW_SEC
-      y_order: 1 if order_spike or strong within ±MOMENT_WINDOW_SEC
-      y_strong: 1 if strong within ±MOMENT_WINDOW_SEC
+      y_click: 1 if click-like moment within ±MOMENT_WINDOW_SEC
+      y_order: 1 if order-like moment within ±MOMENT_WINDOW_SEC
+      y_strong: 1 if strong/purchase_popup within ±MOMENT_WINDOW_SEC
       weight_click: max distance-decay weight for click moments
       weight_order: max distance-decay weight for order moments
-      nearest_click_sec: distance to nearest click/strong moment
-      nearest_order_sec: distance to nearest order/strong moment
+      nearest_click_sec: distance to nearest click-like moment
+      nearest_order_sec: distance to nearest order-like moment
+      moment_source: 'csv', 'screen', 'both', or 'none'
+      has_screen_moment: 1 if any screen moment matched
+      has_csv_moment: 1 if any csv moment matched
+      screen_purchase_popup: 1 if purchase_popup detected
+      screen_product_viewers: 1 if product_viewers_popup detected
     """
     phase_mid = (phase_start + phase_end) / 2
 
@@ -321,6 +350,20 @@ def compute_labels_v2(phase_start: float, phase_end: float, moments: list):
     weight_order = 0.0
     nearest_click = None
     nearest_order = None
+    has_csv = 0
+    has_screen = 0
+    screen_purchase = 0
+    screen_viewers = 0
+
+    # Moment type mapping:
+    # CSV:    click_spike, order_spike, strong → click/order/strong
+    # Screen: purchase_popup → strong (strongest signal)
+    #         product_viewers_popup → click (interest signal)
+    #         viewer_spike → click
+    #         comment_spike → click
+    CLICK_TYPES = {"click_spike", "click", "product_viewers_popup", "viewer_spike", "comment_spike"}
+    ORDER_TYPES = {"order_spike", "purchase_popup"}
+    STRONG_TYPES = {"strong", "purchase_popup"}
 
     for m in moments:
         sec = m["video_sec"]
@@ -331,21 +374,46 @@ def compute_labels_v2(phase_start: float, phase_end: float, moments: list):
 
         w = math.exp(-dist / WEIGHT_DECAY_TAU)
         mtype = m["moment_type"]
+        detail = m.get("moment_type_detail", mtype)
+        source = m.get("source", "csv")
 
-        if mtype in ("click_spike", "strong"):
+        # Track source presence
+        if source == "csv":
+            has_csv = 1
+        elif source == "screen":
+            has_screen = 1
+            if detail == "purchase_popup":
+                screen_purchase = 1
+            elif detail == "product_viewers_popup":
+                screen_viewers = 1
+
+        # Use detail for finer classification when available
+        effective_type = detail if detail else mtype
+
+        if effective_type in CLICK_TYPES or effective_type in STRONG_TYPES:
             y_click = 1
             weight_click = max(weight_click, w)
             if nearest_click is None or dist < nearest_click:
                 nearest_click = dist
 
-        if mtype in ("order_spike", "strong"):
+        if effective_type in ORDER_TYPES or effective_type in STRONG_TYPES:
             y_order = 1
             weight_order = max(weight_order, w)
             if nearest_order is None or dist < nearest_order:
                 nearest_order = dist
 
-        if mtype == "strong":
+        if effective_type in STRONG_TYPES:
             y_strong = 1
+
+    # Determine combined source
+    if has_csv and has_screen:
+        moment_source = "both"
+    elif has_csv:
+        moment_source = "csv"
+    elif has_screen:
+        moment_source = "screen"
+    else:
+        moment_source = "none"
 
     return {
         "y_click": y_click,
@@ -355,6 +423,11 @@ def compute_labels_v2(phase_start: float, phase_end: float, moments: list):
         "weight_order": round(weight_order, 4),
         "nearest_click_sec": round(nearest_click, 1) if nearest_click is not None else None,
         "nearest_order_sec": round(nearest_order, 1) if nearest_order is not None else None,
+        "moment_source": moment_source,
+        "has_screen_moment": has_screen,
+        "has_csv_moment": has_csv,
+        "screen_purchase_popup": screen_purchase,
+        "screen_product_viewers": screen_viewers,
     }
 
 
@@ -414,14 +487,17 @@ async def generate(output_dir: str, video_id=None, user_id=None):
 
         video_ids = list(set(str(r.video_id) for r in phases))
         print(f"[dataset] Spanning {len(video_ids)} videos")
-
-        print("[dataset] Fetching sales moments...")
+        print(f"[dataset] Fetching sales moments...")
         try:
             moments_rows = await fetch_sales_moments(session, video_id=video_id)
-            print(f"[dataset] Found {len(moments_rows)} sales moments")
+            n_csv = sum(1 for r in moments_rows if getattr(r, 'source', 'csv') == 'csv')
+            n_screen = sum(1 for r in moments_rows if getattr(r, 'source', 'csv') == 'screen')
+            print(f"[dataset] Found {len(moments_rows)} sales moments "
+                  f"(csv={n_csv}, screen={n_screen})")
         except Exception as e:
             print(f"[dataset] Warning: Could not fetch sales moments: {e}")
             moments_rows = []
+            n_csv = n_screen = 0
 
         print("[dataset] Fetching product stats...")
         try:
@@ -598,6 +674,11 @@ async def generate(output_dir: str, video_id=None, user_id=None):
         if n_pos > 0:
             print(f"  positive rate: {n_pos / len(dataset) * 100:.1f}%")
 
+    # Source distribution stats
+    source_counts = defaultdict(int)
+    for r in all_records:
+        source_counts[r.get("moment_source", "none")] += 1
+
     # Also write combined stats
     stats["human_review"] = {
         "reviewed_phases": n_reviewed,
@@ -605,6 +686,12 @@ async def generate(output_dir: str, video_id=None, user_id=None):
         "review_rate": round(n_reviewed / max(len(all_records), 1), 4),
         "human_tag_features": HUMAN_TAG_FEATURES,
         "comment_keyword_features": [g[0] for g in COMMENT_KEYWORD_GROUPS],
+    }
+    stats["moment_sources"] = {
+        "csv_moments": n_csv,
+        "screen_moments": n_screen,
+        "total_moments": n_csv + n_screen,
+        "phases_by_source": dict(source_counts),
     }
     stats_path = os.path.join(output_dir, "dataset_stats.json")
     with open(stats_path, "w", encoding="utf-8") as f:
@@ -615,7 +702,7 @@ async def generate(output_dir: str, video_id=None, user_id=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate AI training dataset v3")
+    parser = argparse.ArgumentParser(description="Generate AI training dataset v4")
     parser.add_argument("--output-dir", "-o", default="/tmp/datasets",
                         help="Output directory for JSONL files")
     parser.add_argument("--video-id", default=None,

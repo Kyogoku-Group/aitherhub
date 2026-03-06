@@ -1830,6 +1830,8 @@ async def ensure_sales_moments_table():
             time_sec FLOAT NOT NULL,
             video_sec FLOAT NOT NULL,
             moment_type VARCHAR(20) NOT NULL,
+            moment_type_detail VARCHAR(50),
+            source VARCHAR(20) DEFAULT 'csv' NOT NULL,
             click_value FLOAT DEFAULT 0,
             click_delta FLOAT DEFAULT 0,
             click_sigma_score FLOAT DEFAULT 0,
@@ -1854,11 +1856,36 @@ async def ensure_sales_moments_table():
         CREATE INDEX IF NOT EXISTS ix_vsm_moment_type
         ON video_sales_moments (moment_type)
     """)
+    idx4 = text("""
+        CREATE INDEX IF NOT EXISTS ix_vsm_source
+        ON video_sales_moments (source)
+    """)
+    idx5 = text("""
+        CREATE INDEX IF NOT EXISTS ix_vsm_video_source
+        ON video_sales_moments (video_id, source)
+    """)
+    # ALTER TABLE for existing tables (idempotent)
+    alter1 = text("""
+        ALTER TABLE video_sales_moments
+        ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'csv' NOT NULL
+    """)
+    alter2 = text("""
+        ALTER TABLE video_sales_moments
+        ADD COLUMN IF NOT EXISTS moment_type_detail VARCHAR(50)
+    """)
     async with AsyncSessionLocal() as session:
         await session.execute(sql)
         await session.execute(idx1)
         await session.execute(idx2)
         await session.execute(idx3)
+        # Ensure new columns exist (for tables created before migration)
+        try:
+            await session.execute(alter1)
+            await session.execute(alter2)
+        except Exception:
+            pass  # columns already exist
+        await session.execute(idx4)
+        await session.execute(idx5)
         await session.commit()
 
 
@@ -1870,36 +1897,46 @@ def ensure_sales_moments_table_sync():
 async def bulk_insert_sales_moments(
     video_id: str,
     moments: list,
+    source: str = "csv",
 ):
     """
     検出されたsales_momentsを一括挿入する。
-    既存データは削除してから挿入（冪等性）。
+    同一source内の既存データは削除してから挿入（冪等性）。
+    異なるsourceのデータは保持する。
+
+    Args:
+        video_id: 動画ID
+        moments: 検出されたmomentのリスト
+        source: 'csv' or 'screen'
     """
     if not moments:
         return
 
     import json as _json
 
+    # 同一sourceのデータのみ削除（他sourceは保持）
     delete_sql = text("""
         DELETE FROM video_sales_moments
-        WHERE video_id = :video_id
+        WHERE video_id = :video_id AND source = :source
     """)
 
     insert_sql = text("""
         INSERT INTO video_sales_moments
             (video_id, time_key, time_sec, video_sec, moment_type,
+             moment_type_detail, source,
              click_value, click_delta, click_sigma_score,
              order_value, order_delta, gmv_value,
              confidence, reasons)
         VALUES
             (:video_id, :time_key, :time_sec, :video_sec, :moment_type,
+             :moment_type_detail, :source,
              :click_value, :click_delta, :click_sigma_score,
              :order_value, :order_delta, :gmv_value,
              :confidence, :reasons)
     """)
 
     async with AsyncSessionLocal() as session:
-        await session.execute(delete_sql, {"video_id": video_id})
+        await session.execute(delete_sql, {"video_id": video_id, "source": source})
 
         for m in moments:
             await session.execute(insert_sql, {
@@ -1908,6 +1945,8 @@ async def bulk_insert_sales_moments(
                 "time_sec": m.get("time_sec", 0),
                 "video_sec": m.get("video_sec", 0),
                 "moment_type": m.get("moment_type", "click"),
+                "moment_type_detail": m.get("moment_type_detail", m.get("moment_type", "click")),
+                "source": source,
                 "click_value": m.get("click_value", 0),
                 "click_delta": m.get("click_delta", 0),
                 "click_sigma_score": m.get("click_sigma_score", 0),
@@ -1921,26 +1960,41 @@ async def bulk_insert_sales_moments(
         await session.commit()
 
 
-def bulk_insert_sales_moments_sync(video_id: str, moments: list):
+def bulk_insert_sales_moments_sync(video_id: str, moments: list, source: str = "csv"):
     loop = get_event_loop()
     return loop.run_until_complete(
-        bulk_insert_sales_moments(video_id, moments)
+        bulk_insert_sales_moments(video_id, moments, source=source)
     )
 
 
-async def get_sales_moments(video_id: str):
-    """動画のsales_momentsを取得する"""
-    sql = text("""
-        SELECT id, video_id, time_key, time_sec, video_sec, moment_type,
-               click_value, click_delta, click_sigma_score,
-               order_value, order_delta, gmv_value,
-               confidence, reasons, created_at
-        FROM video_sales_moments
-        WHERE video_id = :video_id
-        ORDER BY video_sec ASC
-    """)
+async def get_sales_moments(video_id: str, source: str = None):
+    """動画のsales_momentsを取得する。source指定でフィルタ可能。"""
+    if source:
+        sql = text("""
+            SELECT id, video_id, time_key, time_sec, video_sec, moment_type,
+                   moment_type_detail, source,
+                   click_value, click_delta, click_sigma_score,
+                   order_value, order_delta, gmv_value,
+                   confidence, reasons, created_at
+            FROM video_sales_moments
+            WHERE video_id = :video_id AND source = :source
+            ORDER BY video_sec ASC
+        """)
+        params = {"video_id": video_id, "source": source}
+    else:
+        sql = text("""
+            SELECT id, video_id, time_key, time_sec, video_sec, moment_type,
+                   moment_type_detail, source,
+                   click_value, click_delta, click_sigma_score,
+                   order_value, order_delta, gmv_value,
+                   confidence, reasons, created_at
+            FROM video_sales_moments
+            WHERE video_id = :video_id
+            ORDER BY video_sec ASC
+        """)
+        params = {"video_id": video_id}
     async with AsyncSessionLocal() as session:
-        result = await session.execute(sql, {"video_id": video_id})
+        result = await session.execute(sql, params)
         rows = result.fetchall()
         return [dict(row._mapping) for row in rows]
 
