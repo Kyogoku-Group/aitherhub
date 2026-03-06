@@ -289,7 +289,6 @@ async def get_video_list(
                 u.email AS user_email,
                 COALESCE(ph.phase_count, 0) AS phase_count,
                 COALESCE(sm.moment_count, 0) AS moment_count,
-                sm.moment_sources,
                 COALESCE(hl.rating_count, 0) AS rating_count,
                 COALESCE(hl.tag_count, 0) AS tag_count,
                 COALESCE(hl.comment_count, 0) AS comment_count,
@@ -302,13 +301,11 @@ async def get_video_list(
             LEFT JOIN (
                 SELECT video_id, COUNT(*) AS phase_count
                 FROM video_phases
-                WHERE deleted_at IS NULL
                 GROUP BY video_id
             ) ph ON ph.video_id = CAST(v.id AS TEXT)
             LEFT JOIN (
                 SELECT video_id,
-                       COUNT(*) AS moment_count,
-                       STRING_AGG(DISTINCT COALESCE(source, 'csv'), ',') AS moment_sources
+                       COUNT(*) AS moment_count
                 FROM video_sales_moments
                 GROUP BY video_id
             ) sm ON sm.video_id = CAST(v.id AS TEXT)
@@ -318,7 +315,6 @@ async def get_video_list(
                        COUNT(CASE WHEN human_sales_tags IS NOT NULL AND human_sales_tags != '[]' THEN 1 END) AS tag_count,
                        COUNT(CASE WHEN user_comment IS NOT NULL AND user_comment != '' THEN 1 END) AS comment_count
                 FROM video_phases
-                WHERE deleted_at IS NULL
                 GROUP BY video_id
             ) hl ON hl.video_id = CAST(v.id AS TEXT)
             LEFT JOIN video_processing_state vps ON vps.video_id = CAST(v.id AS TEXT)
@@ -363,7 +359,7 @@ async def get_video_list(
                 "user_email": r.user_email,
                 "phase_count": r.phase_count,
                 "moment_count": r.moment_count,
-                "moment_sources": r.moment_sources,
+                "moment_sources": None,  # requires migration for source column
                 "rating_count": r.rating_count,
                 "tag_count": r.tag_count,
                 "comment_count": r.comment_count,
@@ -436,42 +432,62 @@ async def get_video_detail(
                 COUNT(CASE WHEN user_comment IS NOT NULL AND user_comment != '' THEN 1 END) AS commented_phases,
                 AVG(user_rating) AS avg_rating,
                 MIN(time_start) AS min_time,
-                MAX(time_end) AS max_time,
-                STRING_AGG(DISTINCT reviewer_name, ', ') FILTER (WHERE reviewer_name IS NOT NULL) AS reviewers
+                MAX(time_end) AS max_time
             FROM video_phases
-            WHERE video_id = :vid AND deleted_at IS NULL
+            WHERE video_id = :vid
         """)
         phases_result = await db.execute(phases_sql, {"vid": video_id})
         phases_summary = phases_result.fetchone()
 
         # ── D. Sales moments breakdown ──
-        moments_sql = text("""
-            SELECT
-                COALESCE(source, 'csv') AS source,
-                moment_type,
-                moment_type_detail,
-                COUNT(*) AS count,
-                AVG(confidence) AS avg_confidence
-            FROM video_sales_moments
-            WHERE video_id = :vid
-            GROUP BY source, moment_type, moment_type_detail
-            ORDER BY source, count DESC
-        """)
-        moments_result = await db.execute(moments_sql, {"vid": video_id})
-        moments_rows = moments_result.fetchall()
+        # Try with source column first, fallback without it
+        try:
+            moments_sql = text("""
+                SELECT
+                    COALESCE(source, 'csv') AS source,
+                    moment_type,
+                    moment_type_detail,
+                    COUNT(*) AS count,
+                    AVG(confidence) AS avg_confidence
+                FROM video_sales_moments
+                WHERE video_id = :vid
+                GROUP BY source, moment_type, moment_type_detail
+                ORDER BY source, count DESC
+            """)
+            moments_result = await db.execute(moments_sql, {"vid": video_id})
+            moments_rows = moments_result.fetchall()
 
-        moments_total = sum(r.count for r in moments_rows)
-        moments_by_source = {}
-        for r in moments_rows:
-            src = r.source or "csv"
-            if src not in moments_by_source:
-                moments_by_source[src] = []
-            moments_by_source[src].append({
-                "moment_type": r.moment_type,
-                "moment_type_detail": r.moment_type_detail,
-                "count": r.count,
-                "avg_confidence": round(float(r.avg_confidence), 3) if r.avg_confidence else None,
-            })
+            moments_total = sum(r.count for r in moments_rows)
+            moments_by_source = {}
+            for r in moments_rows:
+                src = r.source or "csv"
+                if src not in moments_by_source:
+                    moments_by_source[src] = []
+                moments_by_source[src].append({
+                    "moment_type": r.moment_type,
+                    "moment_type_detail": r.moment_type_detail,
+                    "count": r.count,
+                    "avg_confidence": round(float(r.avg_confidence), 3) if r.avg_confidence else None,
+                })
+        except Exception:
+            await db.rollback()
+            # Fallback: source/moment_type_detail/confidence columns not yet migrated
+            moments_sql = text("""
+                SELECT
+                    moment_type,
+                    COUNT(*) AS count
+                FROM video_sales_moments
+                WHERE video_id = :vid
+                GROUP BY moment_type
+                ORDER BY count DESC
+            """)
+            moments_result = await db.execute(moments_sql, {"vid": video_id})
+            moments_rows = moments_result.fetchall()
+            moments_total = sum(r.count for r in moments_rows)
+            moments_by_source = {"csv": [
+                {"moment_type": r.moment_type, "moment_type_detail": None, "count": r.count, "avg_confidence": None}
+                for r in moments_rows
+            ]}
 
         # ── E. Reports check ──
         reports_sql = text("""
@@ -627,7 +643,7 @@ async def get_video_detail(
                 "tagged": phases_summary.tagged_phases if phases_summary else 0,
                 "commented": phases_summary.commented_phases if phases_summary else 0,
                 "avg_rating": round(float(phases_summary.avg_rating), 2) if phases_summary and phases_summary.avg_rating else None,
-                "reviewers": phases_summary.reviewers if phases_summary else None,
+                "reviewers": None,  # requires reviewer_name column migration
             },
             "sales_moments": {
                 "total": moments_total,
@@ -644,7 +660,7 @@ async def get_video_detail(
                 "tagged_phases": phases_summary.tagged_phases if phases_summary else 0,
                 "commented_phases": phases_summary.commented_phases if phases_summary else 0,
                 "avg_rating": round(float(phases_summary.avg_rating), 2) if phases_summary and phases_summary.avg_rating else None,
-                "reviewers": phases_summary.reviewers if phases_summary else None,
+                "reviewers": None,  # requires reviewer_name column migration
             },
             "dataset": {
                 "status": ds_status,
