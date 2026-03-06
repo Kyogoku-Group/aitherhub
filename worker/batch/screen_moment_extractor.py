@@ -32,33 +32,27 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger("process_video")
 
 # ── Vision API Config ──
-# OpenAI (non-Azure) を優先、フォールバックでAzure
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")
+# Azure OpenAI を優先（既存パイプラインと同じ方式）、フォールバックでOpenAI
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 VISION_API_VERSION = os.getenv("VISION_API_VERSION", "2024-06-01")
 VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")
 
 _client = None
 
 
 def _get_client():
-    """Get or create the Vision API client (lazy initialization)."""
+    """Get or create the Vision API client (lazy initialization).
+
+    Priority: Azure OpenAI (same as existing pipeline) > OpenAI (non-Azure).
+    """
     global _client
     if _client is not None:
         return _client
 
-    # Prefer OpenAI (non-Azure)
-    if OPENAI_API_KEY:
-        from openai import OpenAI
-        _client = OpenAI(
-            api_key=OPENAI_API_KEY,
-            base_url=OPENAI_API_BASE if OPENAI_API_BASE else None,
-        )
-        return _client
-
-    # Fallback: Azure OpenAI
+    # Prefer Azure OpenAI (consistent with existing pipeline)
     if AZURE_OPENAI_KEY and AZURE_OPENAI_ENDPOINT:
         from openai import AzureOpenAI
         _client = AzureOpenAI(
@@ -68,9 +62,18 @@ def _get_client():
         )
         return _client
 
+    # Fallback: OpenAI (non-Azure)
+    if OPENAI_API_KEY and not OPENAI_API_KEY.startswith("your-"):
+        from openai import OpenAI
+        _client = OpenAI(
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_API_BASE if OPENAI_API_BASE else None,
+        )
+        return _client
+
     raise RuntimeError(
         "No Vision API credentials found. "
-        "Set OPENAI_API_KEY or AZURE_OPENAI_KEY+AZURE_OPENAI_ENDPOINT."
+        "Set AZURE_OPENAI_KEY+AZURE_OPENAI_ENDPOINT or OPENAI_API_KEY."
     )
 
 
