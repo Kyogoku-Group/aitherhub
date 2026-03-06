@@ -1611,7 +1611,6 @@ async def rate_phase(
                 SET user_rating = :rating,
                     user_comment = :comment,
                     importance_score = :importance_score,
-                    reviewer_name = :reviewer_name,
                     rated_at = NOW(),
                     updated_at = NOW()
                 WHERE video_id = :video_id AND phase_index = :phase_index
@@ -1620,7 +1619,6 @@ async def rate_phase(
                 "rating": rating,
                 "comment": comment,
                 "importance_score": importance_score,
-                "reviewer_name": reviewer_name or None,
                 "video_id": video_id,
                 "phase_index": phase_index,
             })
@@ -1719,13 +1717,11 @@ async def save_phase_comment(
         sql_update = text("""
             UPDATE video_phases
             SET user_comment = :comment,
-                reviewer_name = COALESCE(:reviewer_name, reviewer_name),
                 updated_at = NOW()
             WHERE video_id = :video_id AND phase_index = :phase_index
         """)
         result = await db.execute(sql_update, {
             "comment": comment,
-            "reviewer_name": reviewer_name or None,
             "video_id": video_id,
             "phase_index": phase_index,
         })
@@ -1807,13 +1803,11 @@ async def update_human_sales_tags(
         sql_update = text("""
             UPDATE video_phases
             SET human_sales_tags = :tags,
-                reviewer_name = COALESCE(:reviewer_name, reviewer_name),
                 updated_at = NOW()
             WHERE video_id = :video_id AND phase_index = :phase_index
         """)
         result = await db.execute(sql_update, {
             "tags": tags_json,
-            "reviewer_name": reviewer_name or None,
             "video_id": video_id,
             "phase_index": phase_index,
         })
