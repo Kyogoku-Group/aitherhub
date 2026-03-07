@@ -5,10 +5,32 @@ This module contains ONLY the upload-related endpoints.
 It is intentionally kept separate from video.py so that new feature
 development never accidentally breaks the upload pipeline.
 
-Rules:
-  - No feature-specific logic (clips, phases, reports, etc.) here.
-  - Any change to this file MUST pass the upload regression tests.
-  - The API contract (request/response schemas) MUST remain backward-compatible.
+╔══════════════════════════════════════════════════════════════════╗
+║  FROZEN API CONTRACT – DO NOT CHANGE ROUTES OR RESPONSE SCHEMAS ║
+║                                                                  ║
+║  Routes defined here:                                            ║
+║    POST /api/v1/videos/generate-upload-url                       ║
+║    POST /api/v1/videos/generate-download-url                     ║
+║    POST /api/v1/videos/upload-complete                           ║
+║    POST /api/v1/videos/batch-upload-complete                     ║
+║    POST /api/v1/videos/generate-excel-upload-url                 ║
+║    GET  /api/v1/videos/uploads/check/{user_id}                   ║
+║    DELETE /api/v1/videos/uploads/clear/{user_id}                 ║
+║                                                                  ║
+║  Pipeline order (enforced by UploadPipelineService):             ║
+║    Step 1 – Validate inputs                                      ║
+║    Step 2 – Create DB record  (status = "uploaded")              ║
+║    Step 3 – Generate download SAS URL                            ║
+║    Step 4 – Build queue payload                                  ║
+║    Step 5 – Enqueue worker job                                   ║
+║    Step 6 – Persist enqueue evidence                             ║
+║    Step 7 – Clean up upload session                              ║
+║                                                                  ║
+║  Rules:                                                          ║
+║    - No feature-specific logic (clips, phases, reports) here.    ║
+║    - Any change MUST pass backend/tests/test_upload_pipeline.py  ║
+║    - Worker failures MUST NOT break upload success.              ║
+╚══════════════════════════════════════════════════════════════════╝
 """
 
 from __future__ import annotations
@@ -34,6 +56,7 @@ from app.schema.video_schema import (
     BatchUploadCompleteResponse,
 )
 from app.services.video_service import VideoService
+from app.services.upload_pipeline import UploadPipelineService
 from app.repository.video_repository import VideoRepository
 from app.core.dependencies import get_db, get_current_user
 from app.models.orm.upload import Upload
@@ -56,6 +79,7 @@ async def generate_upload_url(
     payload: GenerateUploadURLRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    """Generate a write-only SAS URL for direct upload to Azure Blob Storage."""
     try:
         result = await _video_service.generate_upload_url(
             email=payload.email,
@@ -73,6 +97,7 @@ async def generate_upload_url(
 # ──────────────────────────────────────────────
 @router.post("/generate-download-url", response_model=GenerateDownloadURLResponse)
 async def generate_download_url(payload: GenerateDownloadURLRequest):
+    """Generate a read-only SAS URL for downloading a blob."""
     try:
         result = await _video_service.generate_download_url(
             email=payload.email,
@@ -94,15 +119,27 @@ async def upload_complete(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """Handle upload completion – save video info to database and enqueue for processing."""
+    """
+    Handle upload completion.
+
+    Pipeline order (guaranteed by UploadPipelineService):
+      1. Validate inputs
+      2. Create DB record  (status = "uploaded")
+      3. Generate download SAS URL
+      4. Enqueue worker job
+      5. Persist enqueue evidence
+      6. Clean up upload session
+
+    Worker failures do NOT break upload success.
+    """
     try:
         if current_user["email"] != payload.email:
             raise HTTPException(status_code=403, detail="Email does not match current user")
 
         video_repo = VideoRepository(lambda: db)
-        service = VideoService(video_repository=video_repo)
+        pipeline = UploadPipelineService(video_repository=video_repo)
 
-        result = await service.handle_upload_complete(
+        result = await pipeline.complete_upload(
             user_id=current_user["id"],
             email=payload.email,
             video_id=payload.video_id,
@@ -114,10 +151,13 @@ async def upload_complete(
             excel_trend_blob_url=payload.excel_trend_blob_url,
             time_offset_seconds=payload.time_offset_seconds or 0,
         )
-        return UploadCompleteResponse(**result)
+        return UploadCompleteResponse(**result.to_dict())
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
+        logger.exception(f"[upload_complete] Unexpected error: {exc}")
         raise HTTPException(status_code=500, detail=f"Failed to complete upload: {exc}")
 
 
@@ -130,17 +170,22 @@ async def batch_upload_complete(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """Handle batch upload completion – multiple videos sharing the same Excel files."""
+    """
+    Handle batch upload completion – multiple videos sharing the same Excel files.
+
+    Each video is processed through the same UploadPipelineService to guarantee
+    consistent pipeline ordering.
+    """
     try:
         if current_user["email"] != payload.email:
             raise HTTPException(status_code=403, detail="Email does not match current user")
 
         video_repo = VideoRepository(lambda: db)
-        service = VideoService(video_repository=video_repo)
+        pipeline = UploadPipelineService(video_repository=video_repo)
 
         video_ids = []
         for v in payload.videos:
-            result = await service.handle_upload_complete(
+            result = await pipeline.complete_upload(
                 user_id=current_user["id"],
                 email=payload.email,
                 video_id=v.video_id,
@@ -152,7 +197,7 @@ async def batch_upload_complete(
                 excel_trend_blob_url=payload.excel_trend_blob_url,
                 time_offset_seconds=v.time_offset_seconds or 0,
             )
-            video_ids.append(result["video_id"])
+            video_ids.append(result.video_id)
 
         return BatchUploadCompleteResponse(
             video_ids=video_ids,
@@ -161,7 +206,10 @@ async def batch_upload_complete(
         )
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
+        logger.exception(f"[batch_upload_complete] Unexpected error: {exc}")
         raise HTTPException(status_code=500, detail=f"Failed to complete batch upload: {exc}")
 
 
