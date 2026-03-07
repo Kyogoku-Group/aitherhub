@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import VideoService from "../base/services/videoService";
+import ClipFeedbackPanel from "./ClipFeedbackPanel";
 
 /**
  * Lightning Clip Editor
@@ -93,6 +94,31 @@ const LightningClipEditor = ({ videoId, clip, onClose, onClipUpdated }) => {
         trimStart,
         trimEnd
       );
+      // Log trim edit for AI learning
+      try {
+        const startDelta = trimStart - originalStart;
+        const endDelta = trimEnd - originalEnd;
+        if (Math.abs(startDelta) > 0.05) {
+          await VideoService.logClipEdit(videoId, {
+            clip_id: clip.clip_id,
+            edit_type: 'trim_start',
+            before_value: { start_sec: originalStart },
+            after_value: { start_sec: trimStart },
+            delta_seconds: startDelta,
+          });
+        }
+        if (Math.abs(endDelta) > 0.05) {
+          await VideoService.logClipEdit(videoId, {
+            clip_id: clip.clip_id,
+            edit_type: 'trim_end',
+            before_value: { end_sec: originalEnd },
+            after_value: { end_sec: trimEnd },
+            delta_seconds: endDelta,
+          });
+        }
+      } catch (logErr) {
+        console.warn('Edit tracking failed (non-blocking):', logErr);
+      }
       setStatusMessage({ type: "success", text: "トリム適用中... 新しいクリップを生成しています" });
       if (onClipUpdated) {
         onClipUpdated(res);
@@ -127,6 +153,24 @@ const LightningClipEditor = ({ videoId, clip, onClose, onClipUpdated }) => {
     setStatusMessage(null);
     try {
       await VideoService.updateClipCaptions(videoId, clip.clip_id, captions);
+      // Log caption edit for AI learning
+      try {
+        const originalCaptions = clip?.captions || [];
+        const changedCaptions = captions.filter((c, i) => {
+          const orig = originalCaptions[i];
+          return orig && (c.text !== orig.text || c.emphasis !== orig.emphasis);
+        });
+        if (changedCaptions.length > 0) {
+          await VideoService.logClipEdit(videoId, {
+            clip_id: clip.clip_id,
+            edit_type: 'caption_edit',
+            before_value: { captions: originalCaptions.map(c => ({ text: c.text, emphasis: c.emphasis })) },
+            after_value: { captions: captions.map(c => ({ text: c.text, emphasis: c.emphasis })) },
+          });
+        }
+      } catch (logErr) {
+        console.warn('Edit tracking failed (non-blocking):', logErr);
+      }
       setStatusMessage({ type: "success", text: "字幕を保存しました" });
     } catch (e) {
       setStatusMessage({ type: "error", text: `字幕保存失敗: ${e.message}` });
@@ -678,14 +722,27 @@ const LightningClipEditor = ({ videoId, clip, onClose, onClipUpdated }) => {
           </div>
         </div>
 
+        {/* Feedback Panel */}
+        <div style={{ padding: '0 20px 16px' }}>
+          <ClipFeedbackPanel
+            videoId={videoId}
+            phaseIndex={clip.phase_index ?? 0}
+            timeStart={clip.time_start || originalStart}
+            timeEnd={clip.time_end || originalEnd}
+            clipId={clip.clip_id}
+            aiScore={clip.ai_score}
+            scoreBreakdown={clip.score_breakdown}
+          />
+        </div>
+
         {/* Footer */}
         <div
           style={{
-            padding: "12px 20px",
-            borderTop: "1px solid #333",
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            padding: "12px 20px",
+            borderTop: "1px solid #333",
           }}
         >
           <span style={{ color: "#666", fontSize: 12 }}>

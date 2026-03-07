@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import VideoService from "../base/services/videoService";
 import LightningClipEditor from "./LightningClipEditor";
+import ClipFeedbackPanel from "./ClipFeedbackPanel";
 
 /**
  * SalesClipCandidates
@@ -459,6 +460,17 @@ export default function SalesClipCandidates({ videoData, onRequestClip, clipStat
                             {/* クリップ生成ボタン */}
                             {renderClipButton(candidate)}
                           </div>
+
+                          {/* クリップ評価（コンパクト版） */}
+                          <ClipFeedbackPanel
+                            videoId={videoData?.id}
+                            phaseIndex={candidate.phase_index}
+                            timeStart={candidate.start_sec}
+                            timeEnd={candidate.end_sec}
+                            aiScore={candidate.score}
+                            scoreBreakdown={candidate.score_breakdown}
+                            compact={true}
+                          />
                         </div>
                       </div>
                     );
