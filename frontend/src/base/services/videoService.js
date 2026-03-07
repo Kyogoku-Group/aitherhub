@@ -1212,5 +1212,80 @@ class VideoService extends BaseApiService {
       throw error;
     }
   }
+
+  // ─── Feedback Loop APIs ─────────────────────────────────────────────────
+
+  /**
+   * Submit clip rating (good/bad) with optional reason tags.
+   * @param {string} videoId
+   * @param {object} data - { phase_index, time_start, time_end, rating, reason_tags?, clip_id? }
+   */
+  async submitClipRating(videoId, data) {
+    try {
+      const response = await this.post(`/api/v1/feedback/${videoId}/clip-rating`, data);
+      return response;
+    } catch (error) {
+      console.error('Failed to submit clip rating:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all clip ratings for a video.
+   * @param {string} videoId
+   */
+  async getClipRatings(videoId) {
+    try {
+      const response = await this.get(`/api/v1/feedback/${videoId}/clip-ratings`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get clip ratings:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Log a clip edit (trim/caption change) for AI learning.
+   * @param {string} videoId
+   * @param {object} data - { clip_id, edit_type, before_value, after_value, delta_seconds? }
+   */
+  async logClipEdit(videoId, data) {
+    try {
+      const response = await this.post(`/api/v1/feedback/${videoId}/edit-log`, data);
+      return response;
+    } catch (error) {
+      console.error('Failed to log clip edit:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Submit sales confirmation (is this clip the selling moment?).
+   * @param {string} videoId
+   * @param {object} data - { phase_index, time_start, time_end, is_sales_moment, clip_id?, confidence?, note? }
+   */
+  async submitSalesConfirmation(videoId, data) {
+    try {
+      const response = await this.post(`/api/v1/feedback/${videoId}/sales-confirmation`, data);
+      return response;
+    } catch (error) {
+      console.error('Failed to submit sales confirmation:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all sales confirmations for a video.
+   * @param {string} videoId
+   */
+  async getSalesConfirmations(videoId) {
+    try {
+      const response = await this.get(`/api/v1/feedback/${videoId}/sales-confirmations`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get sales confirmations:', error);
+      throw error;
+    }
+  }
 }
 export default new VideoService();
