@@ -37,6 +37,15 @@ const SessionManager = {
       if (saved && saved.status !== 'ended') {
         this._session = saved;
         console.log('[AitherHub Session] Restored session:', saved.id, 'status:', saved.status);
+
+        // Restore EventBuffer for the recovered session
+        if (typeof EventBuffer !== 'undefined' && saved.id) {
+          EventBuffer.start(saved.id);
+          console.log('[AitherHub Session] EventBuffer restored for session:', saved.id);
+        }
+
+        // Restart heartbeat
+        this._startHeartbeat();
       }
     }
   },
@@ -47,6 +56,15 @@ const SessionManager = {
    * @returns {Promise<{session_id: string, status: string}>}
    */
   async startSession(params = {}) {
+    // Prevent session duplication - if a session already exists, return it
+    if (this.hasSession()) {
+      console.warn('[AitherHub Session] Session already exists:', this._session.id, '- returning existing');
+      return {
+        session_id: this._session.id,
+        status: this._session.status,
+      };
+    }
+
     try {
       const result = await ExtApiClient.startSession({
         platform: params.platform || 'tiktok_live',

@@ -596,6 +596,22 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'flushEventBuffer') {
     if (SessionManager.hasSession() && EventBuffer._isRunning) {
       await EventBuffer.flush();
+
+      // Update badge based on flush health
+      const bufStats = EventBuffer.getStats();
+      if (bufStats.failCount > 0 && bufStats.lastError) {
+        // Show warning if recent failures
+        const timeSinceLastFlush = bufStats.lastFlushAt
+          ? Date.now() - new Date(bufStats.lastFlushAt).getTime()
+          : Infinity;
+        if (timeSinceLastFlush > 30000) {
+          // No successful flush in 30s - show error
+          updateBadge('!', '#FF9100');
+        }
+      } else if (SessionManager.hasSession()) {
+        // Healthy - show recording
+        updateBadge('REC', '#FF1744');
+      }
     }
   }
 });

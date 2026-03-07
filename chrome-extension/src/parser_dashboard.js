@@ -348,14 +348,30 @@ const DashboardParser = {
       const gmvDelta = curr.gmv - prev.gmv;
       const impressionDelta = curr.impression_count - prev.impression_count;
 
-      if (clickDelta > 0 || cartDelta > 0 || salesDelta > 0 || gmvDelta > 0) {
+      // Guard against negative deltas (page reload / data reset)
+      // If any major metric goes significantly negative, treat as data reset
+      if (clickDelta < -10 || salesDelta < -3 || gmvDelta < -1000) {
+        this._log('Data reset detected for product:', curr.product_id,
+          'click_delta:', clickDelta, 'sales_delta:', salesDelta, 'gmv_delta:', gmvDelta);
+        // Skip this diff, update prev to current
+        continue;
+      }
+
+      // Clamp small negative deltas to 0 (minor DOM parsing jitter)
+      const safeClickDelta = Math.max(0, clickDelta);
+      const safeCartDelta = Math.max(0, cartDelta);
+      const safeSalesDelta = Math.max(0, salesDelta);
+      const safeGmvDelta = Math.max(0, gmvDelta);
+      const safeImpressionDelta = Math.max(0, impressionDelta);
+
+      if (safeClickDelta > 0 || safeCartDelta > 0 || safeSalesDelta > 0 || safeGmvDelta > 0) {
         diffs.push({
           ...curr,
-          click_delta: clickDelta,
-          cart_delta: cartDelta,
-          sales_delta: salesDelta,
-          gmv_delta: gmvDelta,
-          impression_delta: impressionDelta,
+          click_delta: safeClickDelta,
+          cart_delta: safeCartDelta,
+          sales_delta: safeSalesDelta,
+          gmv_delta: safeGmvDelta,
+          impression_delta: safeImpressionDelta,
           is_new: false,
         });
       }

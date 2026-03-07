@@ -24,6 +24,7 @@ const EventBuffer = {
   _sessionId: null,
   _snapshotSeq: 0,
   _isRunning: false,
+  _isFlushing: false,
   _stats: {
     eventsSent: 0,
     eventsDropped: 0,
@@ -130,6 +131,10 @@ const EventBuffer = {
    */
   async flush() {
     if (!this._sessionId) return;
+    if (this._isFlushing) return; // Prevent concurrent flushes
+    this._isFlushing = true;
+
+    try {
 
     // 1. Drain backup queue first (events from previous failed flushes)
     try {
@@ -187,7 +192,7 @@ const EventBuffer = {
       }
     }
 
-    // 3. Send trend snapshot
+    // 4. Send trend snapshot
     if (this._trendSnapshotBuffer) {
       const snapshot = this._trendSnapshotBuffer;
       this._trendSnapshotBuffer = null;
@@ -201,6 +206,10 @@ const EventBuffer = {
       } catch (err) {
         console.error('[AitherHub Buffer] Trend snapshot flush failed:', err.message);
       }
+    }
+
+    } finally {
+      this._isFlushing = false;
     }
   },
 
