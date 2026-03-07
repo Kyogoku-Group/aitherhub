@@ -904,6 +904,79 @@ async def get_upload_health(
                 pass
             recent_errors = []
 
+        # ── Enqueue statistics ──
+        enqueue_ok_count = await _q(
+            db, "SELECT COUNT(*) FROM videos WHERE enqueue_status = 'OK'"
+        )
+        enqueue_failed_count = await _q(
+            db, "SELECT COUNT(*) FROM videos WHERE enqueue_status = 'FAILED'"
+        )
+        enqueue_ok_24h = await _q(
+            db,
+            "SELECT COUNT(*) FROM videos WHERE enqueue_status = 'OK'"
+            " AND created_at >= NOW() - INTERVAL '24 hours'",
+        )
+        enqueue_failed_24h = await _q(
+            db,
+            "SELECT COUNT(*) FROM videos WHERE enqueue_status = 'FAILED'"
+            " AND created_at >= NOW() - INTERVAL '24 hours'",
+        )
+        enqueue_total = enqueue_ok_count + enqueue_failed_count
+        enqueue_rate_pct = (
+            round(enqueue_ok_count / enqueue_total * 100, 1) if enqueue_total > 0 else None
+        )
+
+        # ── Retry candidates (enqueue FAILED, not yet DONE/ERROR) ──
+        try:
+            retry_result = await db.execute(text("""
+                SELECT
+                    v.id,
+                    v.original_filename,
+                    v.status,
+                    v.enqueue_status,
+                    v.enqueue_error,
+                    v.created_at,
+                    u.email as user_email
+                FROM videos v
+                LEFT JOIN users u ON v.user_id = u.id
+                WHERE v.enqueue_status = 'FAILED'
+                  AND v.status NOT IN ('DONE', 'ERROR')
+                ORDER BY v.created_at DESC
+                LIMIT 10
+            """))
+            retry_rows = retry_result.fetchall()
+            retry_candidates = [
+                {
+                    "video_id": str(row.id),
+                    "filename": row.original_filename,
+                    "status": row.status,
+                    "enqueue_error": row.enqueue_error,
+                    "created_at": str(row.created_at) if row.created_at else None,
+                    "user_email": row.user_email,
+                }
+                for row in retry_rows
+            ]
+        except Exception as e:
+            logger.warning(f"Failed to fetch retry candidates: {e}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            retry_candidates = []
+
+        # ── Pipeline stage distribution ──
+        uploaded_waiting = await _q(
+            db, "SELECT COUNT(*) FROM videos WHERE status = 'uploaded'"
+        )
+        pipeline_stages = {
+            "uploaded_waiting": uploaded_waiting,
+            "processing": processing_count,
+            "done": done_count,
+            "error": error_count,
+            "enqueue_failed": enqueue_failed_count,
+            "stuck_gt_2h": stuck_count,
+        }
+
         return {
             "overall": {
                 "total_uploads": total_uploads,
@@ -924,6 +997,15 @@ async def get_upload_health(
                 "done": done_7d,
                 "error": error_7d,
             },
+            "enqueue_stats": {
+                "total_ok": enqueue_ok_count,
+                "total_failed": enqueue_failed_count,
+                "ok_last_24h": enqueue_ok_24h,
+                "failed_last_24h": enqueue_failed_24h,
+                "enqueue_success_rate_pct": enqueue_rate_pct,
+            },
+            "pipeline_stages": pipeline_stages,
+            "retry_candidates": retry_candidates,
             "stuck_videos": stuck_count,
             "status_distribution": status_distribution,
             "recent_uploads": recent_uploads,
