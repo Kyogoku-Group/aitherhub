@@ -69,7 +69,7 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
   const retryCountRef = useRef(0);
   const lastInitializedVideoIdRef = useRef(null);
   const maxProgressRef = useRef(0);
-  const MAX_SSE_RETRIES = 2;
+  const MAX_SSE_RETRIES = 5;
 
   // ── Timing refs (not state to avoid re-renders) ──
   const clockSkewMsRef = useRef(null);        // clientNow - serverNow (measured once)
@@ -531,10 +531,12 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
 
         if (retryCountRef.current > MAX_SSE_RETRIES) {
           console.warn(`SSE failed ${MAX_SSE_RETRIES} times, falling back to polling`);
-          setErrorMessage('リアルタイム更新に接続できません。定期的に更新しています。');
           startPolling();
+          // Clear error message after polling starts - polling works fine
+          setErrorMessage(null);
         } else {
-          setErrorMessage('接続エラーが発生しました。再試行中...');
+          // Don't show alarming error for transient SSE reconnects
+          console.log(`SSE retry ${retryCountRef.current}/${MAX_SSE_RETRIES}`);
         }
       },
     });
