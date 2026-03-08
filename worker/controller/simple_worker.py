@@ -26,7 +26,7 @@ REALTIME_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "re
 sys.path.insert(0, BATCH_DIR)
 
 # Maximum concurrent jobs
-MAX_WORKERS = int(os.getenv("WORKER_MAX_CONCURRENT", "1"))
+MAX_WORKERS = int(os.getenv("WORKER_MAX_CONCURRENT", "2"))
 
 # Maximum retry attempts before treating message as poison and deleting it
 MAX_DEQUEUE_COUNT = int(os.getenv("WORKER_MAX_RETRIES", "3"))

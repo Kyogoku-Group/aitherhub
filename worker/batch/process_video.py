@@ -92,7 +92,7 @@ from excel_parser import load_excel_data, match_sales_to_phase, build_phase_stat
 from csv_slot_filter import get_important_time_ranges, filter_phases_by_importance, detect_sales_moments
 from screen_moment_extractor import detect_screen_moments
 from video_status import VideoStatus
-from video_compressor import compress_and_replace
+from video_compressor import compress_and_replace, generate_analysis_video
 from product_detection_pipeline import detect_product_timeline
 
 
@@ -585,15 +585,39 @@ def main():
             fire_compress_async(video_path, blob_url_for_compress, video_id)
 
         # =========================
+        # STEP 0-PRE: GENERATE ANALYSIS VIDEO (lightweight)
+        # =========================
+        analysis_video_path = None
+        if start_step <= 0:
+            logger.info("=== STEP 0-PRE: GENERATE ANALYSIS VIDEO ===")
+            _analysis_out = os.path.join(os.path.dirname(video_path), "analysis.mp4")
+            analysis_video_path = generate_analysis_video(
+                input_path=video_path,
+                output_path=_analysis_out,
+                fps=1,
+                scale_width=1280,
+                crf=28,
+                preset="veryfast",
+            )
+            if analysis_video_path:
+                logger.info("[ANALYSIS_VIDEO] Created: %s", analysis_video_path)
+            else:
+                logger.warning("[ANALYSIS_VIDEO] Failed, falling back to RAW video for frames")
+
+        # =========================
         # STEP 0 + STEP 3 – PARALLEL: EXTRACT FRAMES & AUDIO TRANSCRIPTION
         # =========================
         frame_dir = frames_dir(video_id)
         ad = audio_dir(video_id)
         atd = audio_text_dir(video_id)
 
+        # Use analysis video for frame extraction if available, RAW for audio
+        _frames_source = analysis_video_path if analysis_video_path else video_path
+
         if start_step <= 0:
             update_video_status_sync(video_id, VideoStatus.STEP_0_EXTRACT_FRAMES)
             logger.info("=== STEP 0+3 PARALLEL – EXTRACT FRAMES & AUDIO TRANSCRIPTION ===")
+            logger.info("[FRAMES] Source: %s (analysis=%s)", _frames_source, bool(analysis_video_path))
 
             # Combined progress: frames=50%, audio=50%
             _parallel_progress = {"frames": 0, "audio": 0}
@@ -614,9 +638,9 @@ def main():
                 _update_combined_progress()
 
             def _do_extract_frames():
-                logger.info("[PARALLEL] Starting frame extraction (fps=1)")
+                logger.info("[PARALLEL] Starting frame extraction (fps=1) from %s", _frames_source)
                 extract_frames(
-                    video_path=video_path,
+                    video_path=_frames_source,
                     fps=1,
                     frames_root=video_root(video_id),
                     on_progress=_on_frames_progress,
@@ -647,6 +671,14 @@ def main():
             update_video_step_progress_sync(video_id, 100)
             logger.info("=== STEP 0+3 PARALLEL COMPLETE ===")
 
+            # Clean up analysis video to reclaim disk space
+            if analysis_video_path and os.path.exists(analysis_video_path):
+                try:
+                    os.remove(analysis_video_path)
+                    logger.info("[ANALYSIS_VIDEO] Cleaned up: %s", analysis_video_path)
+                except Exception as e:
+                    logger.warning("[ANALYSIS_VIDEO] Cleanup failed: %s", e)
+
         elif start_step <= 1:
             # Only frames needed (audio already done in a previous run)
             update_video_status_sync(video_id, VideoStatus.STEP_0_EXTRACT_FRAMES)
@@ -656,12 +688,25 @@ def main():
                     update_video_step_progress_sync(video_id, pct)
                 except Exception:
                     pass
+            # Try to generate analysis video for faster extraction
+            _analysis_out_resume = os.path.join(os.path.dirname(video_path), "analysis.mp4")
+            _resume_source = generate_analysis_video(
+                input_path=video_path,
+                output_path=_analysis_out_resume,
+                fps=1, scale_width=1280, crf=28, preset="veryfast",
+            ) or video_path
             extract_frames(
-                video_path=video_path,
+                video_path=_resume_source,
                 fps=1,
                 frames_root=video_root(video_id),
                 on_progress=_on_frames_only_progress,
             )
+            # Clean up analysis video
+            if _resume_source != video_path and os.path.exists(_resume_source):
+                try:
+                    os.remove(_resume_source)
+                except Exception:
+                    pass
         else:
             logger.info("[SKIP] STEP 0")
 

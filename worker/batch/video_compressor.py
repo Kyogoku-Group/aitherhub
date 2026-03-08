@@ -172,11 +172,90 @@ def needs_compression(video_path: str) -> bool:
         return False
 
 
+def generate_analysis_video(
+    input_path: str,
+    output_path: str | None = None,
+    fps: int = 1,
+    scale_width: int = 1280,
+    crf: int = 28,
+    preset: str = "veryfast",
+) -> str | None:
+    """
+    Generate a lightweight analysis-only video for fast frame extraction.
+
+    Reduces a raw 4 GB screen recording to ~80-200 MB by:
+    - Dropping to *fps* frames per second (default 1 fps)
+    - Scaling to *scale_width* px wide (default 1280)
+    - Using high CRF (28) and veryfast preset
+    - Stripping audio entirely (-an)
+
+    Downstream frame extraction (``extract_frames``) runs 10x faster on
+    this lightweight file compared to the original RAW video.
+
+    Returns:
+        Path to the analysis video, or None on failure.
+    """
+    if not FFMPEG:
+        logger.error("[ANALYSIS_VIDEO] FFmpeg not found!")
+        return None
+    if not os.path.exists(input_path):
+        logger.error("[ANALYSIS_VIDEO] Input not found: %s", input_path)
+        return None
+    if output_path is None:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_analysis{ext}"
+
+    original_size = os.path.getsize(input_path)
+    logger.info(
+        "[ANALYSIS_VIDEO] Generating analysis video: %s (%.2f GB) → fps=%d, w=%d, crf=%d",
+        input_path, original_size / (1024 ** 3), fps, scale_width, crf,
+    )
+
+    cmd = [
+        FFMPEG, "-y",
+        "-i", input_path,
+        "-vf", f"fps={fps},scale={scale_width}:-1",
+        "-c:v", "libx264",
+        "-preset", preset,
+        "-crf", str(crf),
+        "-an",                  # no audio – analysis only
+        "-movflags", "+faststart",
+        output_path,
+    ]
+
+    try:
+        logger.info("[ANALYSIS_VIDEO] FFmpeg command: %s", " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error("[ANALYSIS_VIDEO] FFmpeg failed: %s", result.stderr[-2000:] if result.stderr else "")
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            return None
+        if not os.path.exists(output_path):
+            logger.error("[ANALYSIS_VIDEO] Output not created")
+            return None
+
+        analysis_size = os.path.getsize(output_path)
+        ratio = (1 - analysis_size / original_size) * 100 if original_size > 0 else 0
+        logger.info(
+            "[ANALYSIS_VIDEO] SUCCESS: %.2f GB → %.2f MB (%.1f%% reduction)",
+            original_size / (1024 ** 3),
+            analysis_size / (1024 ** 2),
+            ratio,
+        )
+        return output_path
+    except Exception as e:
+        logger.error("[ANALYSIS_VIDEO] Unexpected error: %s", e)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return None
+
+
 def compress_to_1080p(
     input_path: str,
     output_path: str | None = None,
     crf: int = 23,
-    preset: str = "medium",
+    preset: str = "veryfast",
 ) -> str | None:
     """
     Compress video to 1080p using FFmpeg.
@@ -184,7 +263,7 @@ def compress_to_1080p(
     Uses H.264 (libx264) with:
     - Scale to 1080p height (maintain aspect ratio)
     - CRF 23 (good quality, reasonable file size)
-    - medium preset (balanced speed/compression)
+    - veryfast preset (speed-optimised; ~3-5x faster than medium)
     - AAC audio at 128kbps
 
     Args:
@@ -395,7 +474,7 @@ def compress_and_replace(
     video_path: str,
     blob_url: str | None = None,
     crf: int = 23,
-    preset: str = "medium",
+    preset: str = "veryfast",
 ) -> str:
     """
     Main entry point: compress video to 1080p and optionally replace in Blob Storage.

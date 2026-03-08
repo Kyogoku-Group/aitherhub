@@ -242,18 +242,13 @@ def _get_video_duration_sec(path: str) -> float | None:
 def cut_segment(input_path: str, output_path: str, start_sec: float, end_sec: float) -> bool:
     """Cut a segment from the video with audio.
 
-    Strategy (2026-03 revision):
-    - Use ``-ss BEFORE -i`` with ``-accurate_seek`` for fast AND frame-accurate
-      seeking.  This avoids decoding the entire file up to start_sec, which made
-      90-minute videos take >10 minutes and sometimes time-out.
-    - Always re-encode (libx264 + aac) so that audio/video are perfectly synced
-      at the new start point regardless of keyframe alignment.
-    - After cutting, verify the output duration with ffprobe and log a warning
-      if it deviates by more than 2 s from the requested duration.
-
-    Previous approach (``-ss AFTER -i``) was frame-accurate but extremely slow on
-    long videos and caused the fallback path (with a broken relative-offset
-    calculation) to be triggered, producing wrong clip start times.
+    Strategy (2026-03 v2 revision):
+    - First try ``-c copy`` (stream copy) for near-instant cutting without
+      re-encoding.  This preserves original quality (1080p) and finishes in
+      seconds instead of minutes.
+    - If stream-copy produces a duration deviation > 3s (due to keyframe
+      alignment), fall back to re-encode with ``-preset veryfast``.
+    - Use ``-ss BEFORE -i`` for fast seeking in all modes.
     """
     duration = end_sec - start_sec
     if duration <= 0:
@@ -268,41 +263,78 @@ def cut_segment(input_path: str, output_path: str, start_sec: float, end_sec: fl
         f"(requested duration={duration:.2f}s) from {input_path}"
     )
 
-    # Primary: -ss BEFORE -i + -accurate_seek  (fast + accurate)
-    cmd = [
+    success = False
+
+    # ---- Phase 1: Stream copy (near-instant, 1080p preserved) ----
+    cmd_copy = [
         FFMPEG_BIN, "-y",
         "-ss", f"{start_sec:.3f}",
-        "-accurate_seek",
         "-i", input_path,
         "-t", f"{duration:.3f}",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c", "copy",
         "-movflags", "+faststart",
+        "-avoid_negative_ts", "make_zero",
         output_path,
     ]
-    success = False
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
-        success = True
-        logger.info(f"[CUT_SEGMENT] Primary cut succeeded")
+        subprocess.run(cmd_copy, check=True, capture_output=True, text=True, timeout=120)
+        # Verify duration
+        copy_dur = _get_video_duration_sec(output_path)
+        if copy_dur is not None and abs(copy_dur - duration) <= 3.0:
+            success = True
+            logger.info(
+                f"[CUT_SEGMENT] Stream-copy cut succeeded "
+                f"(actual={copy_dur:.2f}s, deviation={abs(copy_dur - duration):.2f}s)"
+            )
+        elif copy_dur is not None:
+            logger.warning(
+                f"[CUT_SEGMENT] Stream-copy duration deviation too large: "
+                f"requested={duration:.2f}s actual={copy_dur:.2f}s, will re-encode"
+            )
+        else:
+            logger.warning("[CUT_SEGMENT] Stream-copy: could not verify duration, will re-encode")
     except subprocess.CalledProcessError as e:
-        logger.error(
-            f"[CUT_SEGMENT] Primary cut failed (start={start_sec:.2f}s): "
-            f"{e.stderr[-500:] if e.stderr else e}"
+        logger.warning(
+            f"[CUT_SEGMENT] Stream-copy failed: {e.stderr[-300:] if e.stderr else e}"
         )
     except subprocess.TimeoutExpired:
-        logger.error(f"[CUT_SEGMENT] Primary cut timed out after 600s (start={start_sec:.2f}s)")
+        logger.warning(f"[CUT_SEGMENT] Stream-copy timed out")
+
+    # ---- Phase 2: Re-encode with veryfast preset (accurate) ----
+    if not success:
+        logger.info("[CUT_SEGMENT] Falling back to re-encode (veryfast)")
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-ss", f"{start_sec:.3f}",
+            "-accurate_seek",
+            "-i", input_path,
+            "-t", f"{duration:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600)
+            success = True
+            logger.info(f"[CUT_SEGMENT] Re-encode cut succeeded")
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                f"[CUT_SEGMENT] Re-encode cut failed (start={start_sec:.2f}s): "
+                f"{e.stderr[-500:] if e.stderr else e}"
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(f"[CUT_SEGMENT] Re-encode cut timed out after 600s (start={start_sec:.2f}s)")
 
     if not success:
-        # Fallback: -ss BEFORE -i without -accurate_seek (nearest keyframe, slightly
-        # less accurate but never wrong by more than ~2s)
-        logger.warning(f"[CUT_SEGMENT] Trying fallback cut (keyframe seek, no accurate_seek)")
+        # Final fallback: keyframe seek without accurate_seek
+        logger.warning(f"[CUT_SEGMENT] Trying final fallback (keyframe seek, veryfast)")
         cmd_fallback = [
             FFMPEG_BIN, "-y",
             "-ss", f"{start_sec:.3f}",
             "-i", input_path,
             "-t", f"{duration:.3f}",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
             output_path,
@@ -310,9 +342,9 @@ def cut_segment(input_path: str, output_path: str, start_sec: float, end_sec: fl
         try:
             subprocess.run(cmd_fallback, check=True, capture_output=True, text=True, timeout=600)
             success = True
-            logger.info(f"[CUT_SEGMENT] Fallback cut succeeded")
+            logger.info(f"[CUT_SEGMENT] Final fallback cut succeeded")
         except Exception as e2:
-            logger.error(f"[CUT_SEGMENT] Fallback cut also failed: {e2}")
+            logger.error(f"[CUT_SEGMENT] Final fallback cut also failed: {e2}")
             return False
 
     # Post-cut verification

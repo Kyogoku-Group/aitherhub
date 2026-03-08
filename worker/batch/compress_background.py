@@ -94,7 +94,7 @@ def main():
     base, ext = os.path.splitext(video_path)
     preview_local_path = f"{base}_preview{ext}"
     compressed_path = compress_to_1080p(
-        video_path, output_path=preview_local_path, crf=23, preset="medium"
+        video_path, output_path=preview_local_path, crf=23, preset="veryfast"
     )
 
     if compressed_path is None:
