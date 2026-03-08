@@ -78,6 +78,8 @@ async def login(
     refresh_token = create_refresh_token(str(user.id))
 
     return {
+        "user_id": str(user.id),
+        "email": user.email,
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",

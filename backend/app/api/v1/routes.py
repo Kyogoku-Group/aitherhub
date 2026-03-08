@@ -16,6 +16,7 @@ from app.api.v1.endpoints.upload_core import router as upload_core_router
 from app.api.v1.endpoints.feature_flags import router as feature_flags_router
 from app.api.v1.endpoints.clip_feedback import router as clip_feedback_router
 from app.api.v1.endpoints.feedback_loop import router as feedback_loop_router
+from app.api.v1.endpoints.live_analysis import router as live_analysis_router
 
 routers = APIRouter()
 routers.include_router(auth_router, prefix="/auth", tags=["Auth"])
@@ -34,3 +35,4 @@ routers.include_router(report_router)
 routers.include_router(feature_flags_router)
 routers.include_router(clip_feedback_router, prefix="/clips", tags=["Clip Feedback"])
 routers.include_router(feedback_loop_router, prefix="/feedback", tags=["Feedback Loop"])
+routers.include_router(live_analysis_router)
