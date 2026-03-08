@@ -299,8 +299,8 @@ class VideoService extends BaseApiService {
     const signal = controller.signal;
 
     // Retry configuration
-    const MAX_RETRIES = 3;
-    const RETRY_DELAY = 5000; // 5 seconds
+    const MAX_RETRIES = 5;
+    const RETRY_DELAY = 3000; // 3 seconds
     const HEARTBEAT_TIMEOUT = 120000; // 2 minutes without heartbeat = connection lost
     let retryCount = 0;
     let lastHeartbeatTime = Date.now();
