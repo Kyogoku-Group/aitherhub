@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import VideoService from "../base/services/videoService";
 import { useSectionState } from "../base/hooks/useSectionState";
 import { ErrorState } from "./SectionStateUI";
-import LightningClipEditor from "./LightningClipEditor";
+import ClipEditorV2 from "./ClipEditorV2";
 import ClipFeedbackPanel from "./ClipFeedbackPanel";
 
 /**
@@ -487,11 +487,12 @@ export default function SalesClipCandidates({ videoData, onRequestClip, clipStat
         )}
       </div>
 
-      {/* Lightning Clip Editor Modal */}
+      {/* Clip Editor V2 — Full-screen intelligent editor */}
       {editorClip && (
-        <LightningClipEditor
+        <ClipEditorV2
           videoId={videoData?.id}
           clip={editorClip}
+          videoData={videoData}
           onClose={() => setEditorClip(null)}
           onClipUpdated={(res) => {
             // Update clip state after trim
