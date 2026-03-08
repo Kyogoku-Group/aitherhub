@@ -1303,5 +1303,83 @@ class VideoService extends BaseApiService {
       throw error;
     }
   }
+
+  // ─── Clip Editor v2 APIs ──────────────────────────────────────────────
+
+  /**
+   * Get timeline data (phases, markers, scores, feedback) in one call.
+   * @param {string} videoId
+   * @returns {Promise<{phases, markers, event_scores, feedback, phase_count}>}
+   */
+  async getTimelineData(videoId) {
+    try {
+      const response = await this.get(`/api/v1/editor/${videoId}/timeline`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get timeline data:', error);
+      return { phases: [], markers: [], event_scores: [], feedback: [], phase_count: 0 };
+    }
+  }
+
+  /**
+   * Get segment-level AI scores for heatmap.
+   * @param {string} videoId
+   * @returns {Promise<{segments, count}>}
+   */
+  async getSegmentScores(videoId) {
+    try {
+      const response = await this.get(`/api/v1/editor/${videoId}/segments`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get segment scores:', error);
+      return { segments: [], count: 0 };
+    }
+  }
+
+  /**
+   * Get video-level overall score.
+   * @param {string} videoId
+   * @returns {Promise<Object>}
+   */
+  async getVideoScore(videoId) {
+    try {
+      const response = await this.get(`/api/v1/editor/${videoId}/score`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get video score:', error);
+      return { overall_score: null };
+    }
+  }
+
+  /**
+   * Submit segment feedback.
+   * @param {string} videoId
+   * @param {Object} data - { start_sec, end_sec, feedback_type, label?, note? }
+   * @returns {Promise<Object>}
+   */
+  async submitSegmentFeedback(videoId, data) {
+    try {
+      const response = await this.post(`/api/v1/editor/${videoId}/segment-feedback`, data);
+      return response;
+    } catch (error) {
+      console.error('Failed to submit segment feedback:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all segment feedback for a video.
+   * @param {string} videoId
+   * @returns {Promise<{feedback, count}>}
+   */
+  async getSegmentFeedback(videoId) {
+    try {
+      const response = await this.get(`/api/v1/editor/${videoId}/segment-feedback`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get segment feedback:', error);
+      return { feedback: [], count: 0 };
+    }
+  }
 }
 export default new VideoService();
