@@ -3,7 +3,7 @@ Admin dashboard API endpoint.
 Provides platform-wide statistics for the master dashboard.
 Each query is isolated with rollback on failure to prevent cascade errors.
 """
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from loguru import logger
