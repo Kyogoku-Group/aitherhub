@@ -31,6 +31,10 @@ jobs:
 
       - name: Build frontend
         working-directory: frontend
+        env:
+          GIT_COMMIT_SHA: ${{ github.sha }}
+          GIT_BRANCH: ${{ github.ref_name }}
+          BUILD_TIME: ${{ github.event.head_commit.timestamp }}
         run: npm run build
 
       - name: Deploy to Azure Static Web Apps
@@ -41,3 +45,31 @@ jobs:
           action: upload
           app_location: "frontend/dist"
           output_location: ""
+
+  verify_deploy:
+    needs: build_and_deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for deployment propagation
+        run: sleep 30
+
+      - name: Verify frontend deployment
+        run: |
+          echo "Checking frontend version..."
+          RESPONSE=$(curl -sf https://www.aitherhub.com/version.json || echo "FAIL")
+          echo "Frontend version response: $RESPONSE"
+          if [ "$RESPONSE" = "FAIL" ]; then
+            echo "::warning::Frontend version.json not accessible yet"
+          else
+            DEPLOYED_COMMIT=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('commit',''))" 2>/dev/null || echo "")
+            EXPECTED_COMMIT="${{ github.sha }}"
+            echo "Deployed commit: $DEPLOYED_COMMIT"
+            echo "Expected commit: ${EXPECTED_COMMIT:0:7}"
+            if [ -n "$DEPLOYED_COMMIT" ] && [ "$DEPLOYED_COMMIT" != "unknown" ]; then
+              if echo "$EXPECTED_COMMIT" | grep -q "^$DEPLOYED_COMMIT"; then
+                echo "Frontend deployment verified - commit matches"
+              else
+                echo "::warning::Frontend commit mismatch"
+              fi
+            fi
+          fi
