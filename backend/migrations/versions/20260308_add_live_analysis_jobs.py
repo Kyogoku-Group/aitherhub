@@ -9,8 +9,8 @@ from sqlalchemy.dialects.postgresql import UUID
 
 
 revision = "lb20260308001"
-down_revision = None  # standalone migration; run after current head
-branch_labels = ("liveboost",)
+down_revision = "20260308_frame_meta"
+branch_labels = None
 depends_on = None
 
 
