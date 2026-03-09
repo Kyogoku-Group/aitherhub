@@ -1,0 +1,38 @@
+# =============================================================================
+# systemd service for AitherHub Worker Health Check
+# =============================================================================
+# Runs alongside the queue worker, providing health check endpoints.
+#
+# Install:
+#   sudo cp deploy/worker-health.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable worker-health.service
+#   sudo systemctl start worker-health.service
+#
+# Test:
+#   curl http://localhost:8081/health
+# =============================================================================
+
+[Unit]
+Description=AitherHub Worker Health Check
+After=network.target
+
+[Service]
+Type=simple
+User=azureuser
+Group=azureuser
+WorkingDirectory=/var/www/aitherhub
+Environment=PYTHONPATH=/var/www/aitherhub:/var/www/aitherhub/worker/batch
+EnvironmentFile=/var/www/aitherhub/.env
+
+ExecStart=/usr/bin/python3 -m worker.entrypoints.health_check
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aitherhub-worker-health
+
+[Install]
+WantedBy=multi-user.target
