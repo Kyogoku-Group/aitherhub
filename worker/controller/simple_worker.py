@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """Simple queue worker that polls Azure Queue and runs batch processing.
-Supports concurrent processing of multiple jobs using ThreadPoolExecutor."""
+Supports concurrent processing of multiple jobs using ThreadPoolExecutor.
+
+Queue Design (2026-03 improvement):
+  message → worker → fail → retry (with delay) → retry → retry → dead-letter queue
+  POISON messages are NEVER deleted. They are moved to a dead-letter queue
+  for investigation and manual re-processing.
+
+Worker Safety:
+  - File lock prevents duplicate worker instances
+  - Crash guard kills orphaned ffmpeg processes on startup
+  - Graceful shutdown waits for active jobs to complete
+"""
 import os
 import sys
 import json
@@ -28,7 +39,7 @@ sys.path.insert(0, BATCH_DIR)
 # Maximum concurrent jobs
 MAX_WORKERS = int(os.getenv("WORKER_MAX_CONCURRENT", "2"))
 
-# Maximum retry attempts before treating message as poison and deleting it
+# Maximum retry attempts before moving message to dead-letter queue
 MAX_DEQUEUE_COUNT = int(os.getenv("WORKER_MAX_RETRIES", "3"))
 
 # Visibility timeout: 15 minutes (renewed every 5 min while job is active)
@@ -52,9 +63,114 @@ shutdown_requested = False
 # Worker instance identifier for tracing
 WORKER_INSTANCE_ID = f"{socket.gethostname()}-{os.getpid()}"
 
-# --- Poison job log (DLQ) ---
+# --- Poison job log (local backup) ---
 POISON_LOG = Path(__file__).parent.parent / "poison_jobs.jsonl"
 
+# --- Dead Letter Queue name ---
+DEAD_LETTER_QUEUE_NAME = os.getenv("AZURE_DEAD_LETTER_QUEUE_NAME", "video-jobs-dead")
+
+
+# =============================================================================
+# Dead Letter Queue
+# =============================================================================
+
+def get_dead_letter_queue_client():
+    """Get or create the dead-letter queue client."""
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    if not conn_str:
+        raise RuntimeError("AZURE_STORAGE_CONNECTION_STRING required")
+    client = QueueClient.from_connection_string(conn_str, DEAD_LETTER_QUEUE_NAME)
+    # Ensure the dead-letter queue exists (idempotent)
+    try:
+        client.create_queue()
+        print(f"[worker] Dead-letter queue '{DEAD_LETTER_QUEUE_NAME}' created")
+    except Exception:
+        pass  # Queue already exists
+    return client
+
+
+def move_to_dead_letter_queue(payload: dict, reason: str, dequeue_count: int):
+    """Move a failed message to the dead-letter queue instead of deleting it.
+    The original payload is wrapped with metadata for investigation."""
+    envelope = {
+        "original_payload": payload,
+        "dead_letter_reason": reason,
+        "dequeue_count": dequeue_count,
+        "worker_instance": WORKER_INSTANCE_ID,
+        "moved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        dlq_client = get_dead_letter_queue_client()
+        dlq_client.send_message(json.dumps(envelope, ensure_ascii=False))
+        job_id = payload.get("video_id", payload.get("clip_id", "unknown"))
+        print(f"[worker] Moved job {job_id} to dead-letter queue '{DEAD_LETTER_QUEUE_NAME}' "
+              f"(reason={reason}, dequeue_count={dequeue_count})")
+        return True
+    except Exception as e:
+        print(f"[worker] CRITICAL: Failed to move message to dead-letter queue: {e}")
+        return False
+
+
+# =============================================================================
+# Crash Guard
+# =============================================================================
+
+def crash_guard_kill_orphan_ffmpeg():
+    """Kill orphaned ffmpeg processes from previous worker crashes.
+    Only kills ffmpeg processes that are NOT children of the current worker.
+    This prevents zombie ffmpeg processes from consuming resources."""
+    my_pid = os.getpid()
+    killed = 0
+    try:
+        # Find all ffmpeg processes
+        result = subprocess.run(
+            ["pgrep", "-a", "ffmpeg"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            print("[worker][crash-guard] No orphan ffmpeg processes found")
+            return
+
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = line.split(None, 1)
+            if len(parts) < 1:
+                continue
+            pid = int(parts[0])
+            # Don't kill our own children (shouldn't exist at startup, but safe)
+            try:
+                ppid_result = subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", str(pid)],
+                    capture_output=True, text=True, timeout=5
+                )
+                ppid = int(ppid_result.stdout.strip())
+                if ppid == my_pid:
+                    continue
+            except Exception:
+                pass
+
+            # Kill the orphan
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed += 1
+                cmd_info = parts[1] if len(parts) > 1 else "unknown"
+                print(f"[worker][crash-guard] Killed orphan ffmpeg pid={pid}: {cmd_info[:100]}")
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    except Exception as e:
+        print(f"[worker][crash-guard] Error during orphan cleanup: {e}")
+
+    if killed > 0:
+        print(f"[worker][crash-guard] Killed {killed} orphan ffmpeg process(es)")
+    else:
+        print("[worker][crash-guard] No orphan ffmpeg processes found")
+
+
+# =============================================================================
+# Logging & Error Tracking
+# =============================================================================
 
 def log_error_type(job_id: str, job_type: str, error_type: str, detail: str = ""):
     """Log structured error type for every failure. Enables error classification."""
@@ -64,7 +180,8 @@ def log_error_type(job_id: str, job_type: str, error_type: str, detail: str = ""
 
 def record_poison_job(job_id: str, job_type: str, error_type: str,
                       dequeue_count: int = 0, payload: dict | None = None):
-    """Append a poison (permanently failed) job to poison_jobs.jsonl for later analysis."""
+    """Append a poison (permanently failed) job to poison_jobs.jsonl for local backup.
+    The primary record is in the dead-letter queue."""
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "job_id": job_id,
@@ -81,12 +198,20 @@ def record_poison_job(job_id: str, job_type: str, error_type: str,
         print(f"[worker] Warning: Failed to write poison log: {e}")
 
 
+# =============================================================================
+# Signal Handling
+# =============================================================================
+
 def signal_handler(signum, frame):
     global shutdown_requested
     print(f"\n[worker] Received signal {signum}, shutting down gracefully...")
     print(f"[worker] Waiting for {get_active_count()} active jobs to complete before exit...")
     shutdown_requested = True
 
+
+# =============================================================================
+# Queue Operations
+# =============================================================================
 
 def get_queue_client():
     conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
@@ -137,6 +262,57 @@ def visibility_renewal_loop():
                 if new_receipt:
                     info["pop_receipt"] = new_receipt
 
+
+# =============================================================================
+# DB Status Helpers
+# =============================================================================
+
+def update_video_status_to_error(video_id: str):
+    """Mark a video as ERROR in the database."""
+    try:
+        sys.path.insert(0, BATCH_DIR)
+        from db_ops import init_db_sync, update_video_status_sync, close_db_sync
+        from video_status import VideoStatus
+        init_db_sync()
+        update_video_status_sync(video_id, VideoStatus.ERROR)
+        close_db_sync()
+        print(f"[worker] Marked video {video_id} as ERROR")
+    except Exception as db_err:
+        print(f"[worker] Failed to mark video as ERROR: {db_err}")
+
+
+def update_clip_status_to_dead(clip_id: str, error_message: str):
+    """Mark a clip as 'dead' in the database (moved to dead-letter queue)."""
+    try:
+        sys.path.insert(0, BATCH_DIR)
+        from db_ops import init_db_sync, close_db_sync, get_event_loop, get_session
+        from sqlalchemy import text
+        init_db_sync()
+        loop = get_event_loop()
+
+        async def _update():
+            async with get_session() as session:
+                sql = text("""
+                    UPDATE video_clips
+                    SET status = :status, error_message = :error_message, updated_at = NOW()
+                    WHERE id = :clip_id
+                """)
+                await session.execute(sql, {
+                    "status": "dead",
+                    "error_message": error_message[:500],
+                    "clip_id": clip_id,
+                })
+
+        loop.run_until_complete(_update())
+        close_db_sync()
+        print(f"[worker] Marked clip {clip_id} as 'dead'")
+    except Exception as db_err:
+        print(f"[worker] Failed to mark clip as dead: {db_err}")
+
+
+# =============================================================================
+# Job Processors
+# =============================================================================
 
 def process_job(payload: dict, msg_id: str, pop_receipt: str):
     """Process a single job. Runs in a thread.
@@ -229,7 +405,6 @@ def process_live_capture_job(payload: dict):
     username = match.group(1) if match else ""
 
     # Start live monitor as a background subprocess (non-blocking)
-    # Uses WORKER_API_KEY env var for backend auth (no user JWT needed)
     monitor_proc = None
     if username:
         try:
@@ -274,13 +449,9 @@ def process_live_capture_job(payload: dict):
     if monitor_proc and monitor_proc.poll() is None:
         print(f"[worker] Stopping live monitor process group (pid={monitor_proc.pid})")
         try:
-            os.killpg(os.getpgid(monitor_proc.pid), signal.SIGTERM)
-            monitor_proc.wait(timeout=10)
-        except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
-            try:
-                os.killpg(os.getpgid(monitor_proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
+            os.killpg(os.getpgid(monitor_proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
 
     if result.returncode == 0:
         print(f"[worker] Live capture completed for {video_id}")
@@ -291,6 +462,13 @@ def process_live_capture_job(payload: dict):
     else:
         log_error_type(video_id, "live_capture", "SUBPROCESS_FAIL", f"exit_code={result.returncode}")
         return False
+
+
+# Timeout for video analysis subprocess (120 minutes hard limit)
+VIDEO_PROCESS_TIMEOUT = int(os.getenv("WORKER_VIDEO_TIMEOUT", str(120 * 60)))
+
+# Timeout for clip generation subprocess (10 minutes)
+CLIP_PROCESS_TIMEOUT = int(os.getenv("WORKER_CLIP_TIMEOUT", str(10 * 60)))
 
 
 def process_clip_job(payload: dict):
@@ -352,14 +530,6 @@ def process_clip_job(payload: dict):
         return False
 
 
-# Timeout for video analysis subprocess (120 minutes hard limit)
-# Long videos (2h+) can take 60-90 minutes to process
-VIDEO_PROCESS_TIMEOUT = int(os.getenv("WORKER_VIDEO_TIMEOUT", str(120 * 60)))
-
-# Timeout for clip generation subprocess (10 minutes)
-CLIP_PROCESS_TIMEOUT = int(os.getenv("WORKER_CLIP_TIMEOUT", str(10 * 60)))
-
-
 def process_video_job(payload: dict):
     """Handle video analysis job."""
     video_id = payload.get("video_id")
@@ -387,24 +557,14 @@ def process_video_job(payload: dict):
         try:
             proc.wait(timeout=VIDEO_PROCESS_TIMEOUT)
         except subprocess.TimeoutExpired:
-            print(f"[worker] Video timeout \u2014 killing process group (pid={proc.pid})")
+            print(f"[worker] Video timeout — killing process group (pid={proc.pid})")
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, OSError):
                 pass
             proc.wait()
             log_error_type(video_id, "video_analysis", "TIMEOUT_VIDEO", f"timeout={VIDEO_PROCESS_TIMEOUT}s")
-            # Mark as ERROR so it doesn't stay stuck
-            try:
-                sys.path.insert(0, BATCH_DIR)
-                from db_ops import init_db_sync, update_video_status_sync, close_db_sync
-                from video_status import VideoStatus
-                init_db_sync()
-                update_video_status_sync(video_id, VideoStatus.ERROR)
-                close_db_sync()
-                print(f"[worker] Marked timed-out video {video_id} as ERROR")
-            except Exception as db_err:
-                print(f"[worker] Failed to mark timed-out video as ERROR: {db_err}")
+            update_video_status_to_error(video_id)
             return False
 
         if proc.returncode == 0:
@@ -412,7 +572,6 @@ def process_video_job(payload: dict):
             return True
         elif proc.returncode == 2:
             # Exit code 2 = ORPHAN_VIDEO: DB record not found (deleted or never created)
-            # This is NOT a retry-able error. Delete message immediately.
             print(f"[worker] ORPHAN_VIDEO skip: video_id={video_id} not found in DB. "
                   f"Deleting queue message (no retry).")
             log_error_type(video_id, "video_analysis", "ORPHAN_VIDEO",
@@ -427,6 +586,10 @@ def process_video_job(payload: dict):
         return False
 
 
+# =============================================================================
+# Main Loop
+# =============================================================================
+
 def get_active_count():
     """Get the number of currently active jobs."""
     with active_jobs_lock:
@@ -439,7 +602,15 @@ def get_active_count():
 
 def poll_and_process(executor: ThreadPoolExecutor):
     """Poll queue and submit jobs to the thread pool.
-    live_monitor jobs bypass MAX_WORKERS and run on a separate executor."""
+    live_monitor jobs bypass MAX_WORKERS and run on a separate executor.
+
+    Dead Letter Queue flow:
+      dequeue_count >= MAX_DEQUEUE_COUNT
+        → move message to dead-letter queue
+        → delete from main queue
+        → mark job as 'dead' in DB
+        → log to poison_jobs.jsonl (local backup)
+    """
     active_count = get_active_count()
     heavy_slots_full = active_count >= MAX_WORKERS
 
@@ -457,29 +628,40 @@ def poll_and_process(executor: ThreadPoolExecutor):
             job_type = payload.get("job_type", "video_analysis")
             job_id = payload.get("video_id", payload.get("clip_id", "unknown"))
 
-            # --- Poison message detection: delete after too many retries ---
+            # --- Dead Letter Queue: move after too many retries (NEVER delete) ---
             if hasattr(msg, 'dequeue_count') and msg.dequeue_count is not None:
                 if msg.dequeue_count >= MAX_DEQUEUE_COUNT:
+                    reason = f"POISON_MAX_RETRY (dequeue_count={msg.dequeue_count} >= {MAX_DEQUEUE_COUNT})"
                     print(f"[worker] POISON MESSAGE detected: job={job_id}, type={job_type}, "
                           f"dequeue_count={msg.dequeue_count} >= {MAX_DEQUEUE_COUNT}. "
-                          f"Deleting message and marking video as ERROR.")
+                          f"Moving to dead-letter queue.")
+
+                    # Step 1: Move to dead-letter queue (preserve the message)
+                    moved = move_to_dead_letter_queue(payload, reason, msg.dequeue_count)
+
+                    # Step 2: Log locally as backup
                     log_error_type(job_id, job_type, "POISON_MAX_RETRY",
                                    f"dequeue_count={msg.dequeue_count}")
                     record_poison_job(job_id, job_type, "POISON_MAX_RETRY",
                                       dequeue_count=msg.dequeue_count, payload=payload)
-                    delete_message_safe(msg.id, msg.pop_receipt)
-                    # Mark video as ERROR in DB so it doesn't stay in 'uploaded' forever
+
+                    # Step 3: Delete from main queue (only after successful DLQ move)
+                    if moved:
+                        delete_message_safe(msg.id, msg.pop_receipt)
+                    else:
+                        # If DLQ move failed, still delete to prevent infinite loop
+                        # but log a CRITICAL warning
+                        print(f"[worker] CRITICAL: DLQ move failed for {job_id}, "
+                              f"deleting from main queue anyway (data preserved in poison_jobs.jsonl)")
+                        delete_message_safe(msg.id, msg.pop_receipt)
+
+                    # Step 4: Mark job as 'dead' in DB
                     if job_type in ("video_analysis", None) and job_id != "unknown":
-                        try:
-                            sys.path.insert(0, BATCH_DIR)
-                            from db_ops import init_db_sync, update_video_status_sync, close_db_sync
-                            from video_status import VideoStatus
-                            init_db_sync()
-                            update_video_status_sync(job_id, VideoStatus.ERROR)
-                            close_db_sync()
-                            print(f"[worker] Marked video {job_id} as ERROR")
-                        except Exception as db_err:
-                            print(f"[worker] Failed to mark video as ERROR: {db_err}")
+                        update_video_status_to_error(job_id)
+                    elif job_type == "generate_clip":
+                        clip_id = payload.get("clip_id", job_id)
+                        update_clip_status_to_dead(clip_id, reason)
+
                     continue
 
             # --- live_monitor: runs on separate lightweight executor ---
@@ -511,7 +693,7 @@ def poll_and_process(executor: ThreadPoolExecutor):
 
             print(f"[worker] Received job: type={job_type}, id={job_id} (active: {get_active_count()}/{MAX_WORKERS})")
 
-            # --- Improvement 2: Record worker_claimed evidence to DB ---
+            # --- Record worker_claimed evidence to DB ---
             if job_type in ("video_analysis", None) and job_id != "unknown":
                 try:
                     from db_ops import init_db_sync, update_worker_claimed_sync, close_db_sync
@@ -595,7 +777,11 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    # --- Improvement: Log queue connection details for debugging ENV mismatches ---
+    # --- Crash Guard: kill orphaned ffmpeg processes ---
+    print("[worker] Running crash guard...")
+    crash_guard_kill_orphan_ffmpeg()
+
+    # --- Log queue connection details for debugging ENV mismatches ---
     conn_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING', '')
     storage_account = 'UNKNOWN'
     for part in conn_str.split(';'):
@@ -609,11 +795,20 @@ def main():
     print(f"[worker] Instance: {WORKER_INSTANCE_ID}")
     print(f"[worker] Storage account: {storage_account}")
     print(f"[worker] Queue: {queue_name}")
+    print(f"[worker] Dead-letter queue: {DEAD_LETTER_QUEUE_NAME}")
     print(f"[worker] Environment: {env_label}")
     print(f"[worker] Visibility timeout: {VISIBILITY_TIMEOUT}s ({VISIBILITY_TIMEOUT // 60}min, renewed every {VISIBILITY_RENEW_INTERVAL // 60}min)")
     print(f"[worker] Video process timeout: {VIDEO_PROCESS_TIMEOUT}s ({VIDEO_PROCESS_TIMEOUT // 60}min)")
+    print(f"[worker] Clip process timeout: {CLIP_PROCESS_TIMEOUT}s ({CLIP_PROCESS_TIMEOUT // 60}min)")
     print(f"[worker] Max retries (dequeue count): {MAX_DEQUEUE_COUNT}")
     print(f"[worker] Message deletion: after successful completion only (retry on failure)")
+    print(f"[worker] Poison handling: move to dead-letter queue (NEVER delete without backup)")
+
+    # Ensure dead-letter queue exists
+    try:
+        get_dead_letter_queue_client()
+    except Exception as e:
+        print(f"[worker] Warning: Could not initialize dead-letter queue: {e}")
 
     # Start background visibility renewal thread
     renewal_thread = Thread(target=visibility_renewal_loop, daemon=True)

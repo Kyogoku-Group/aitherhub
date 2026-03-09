@@ -1566,7 +1566,7 @@ export default function VideoDetail({ videoData }) {
                                   const clipState = clipStates[itemKey];
                                   const isLoading = clipState?.status === 'requesting' || clipState?.status === 'pending' || clipState?.status === 'processing';
                                   const isCompleted = clipState?.status === 'completed' && clipState?.clip_url;
-                                  const isFailed = clipState?.status === 'failed';
+                                  const isFailed = clipState?.status === 'failed' || clipState?.status === 'dead';
 
                                   return (
                                     <div className="flex items-center gap-3 pt-3 mt-3 border-t border-gray-200">

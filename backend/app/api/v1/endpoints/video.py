@@ -1166,6 +1166,8 @@ async def get_clip_status(
 
         elif row.status == "failed":
             response["error_message"] = row.error_message
+        elif row.status == "dead":
+            response["error_message"] = row.error_message or "Job moved to dead-letter queue after max retries"
 
         return response
 

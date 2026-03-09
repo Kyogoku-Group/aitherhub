@@ -1426,7 +1426,7 @@ export default function DockPlayer({
                   const clipState = clipStates[phaseKey];
                   const isClipLoading = clipState?.status === 'requesting' || clipState?.status === 'pending' || clipState?.status === 'processing';
                   const isClipCompleted = clipState?.status === 'completed' && clipState?.clip_url;
-                  const isClipFailed = clipState?.status === 'failed';
+                  const isClipFailed = clipState?.status === 'failed' || clipState?.status === 'dead';
 
                   if (isClipCompleted) {
                     return (
