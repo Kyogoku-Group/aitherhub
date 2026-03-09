@@ -9,43 +9,87 @@ on:
       - '.github/workflows/deploy_worker.yml'
   workflow_dispatch:
 
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     name: Deploy Worker
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy to Worker VM
-        uses: appleboy/ssh-action@v1
+      - name: Login to Azure
+        uses: azure/login@v2
         with:
-          host: ${{ secrets.WORKER_HOST }}
-          username: azureuser
-          key: ${{ secrets.WORKER_SSH_KEY }}
-          script_stop: true
-          command_timeout: 5m
-          script: |
-            set -e
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_AA4E9EC299D1433D9FF12541F06BA50D }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_AE01A735F8B046C49C5F169706AC5842 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_8E4F3767CE0647AEAA62C4C721F843FE }}
 
-            echo "=== Pull latest code ==="
-            cd /var/www/aitherhub
-            git fetch origin master
-            git reset --hard origin/master
-            echo "HEAD: $(git rev-parse HEAD)"
+      - name: Deploy to Worker VM
+        run: |
+          az vm run-command invoke \
+            --resource-group rg-vdp-kyogoku \
+            --name aitherhubVm \
+            --command-id RunShellScript \
+            --scripts '
+              set -e
+              export HOME=/home/azureuser
+              cd /var/www/aitherhub
 
-            echo ""
-            echo "=== Restart worker service ==="
-            sudo systemctl restart simple-worker.service
-            sleep 5
+              echo "=== Pull latest code ==="
+              git config --global --add safe.directory /var/www/aitherhub
+              git fetch origin master
+              git reset --hard origin/master
+              echo "HEAD: $(git rev-parse HEAD)"
 
-            echo ""
-            echo "=== Verify worker is running ==="
-            sudo systemctl is-active simple-worker.service
-            echo "Worker PID: $(systemctl show simple-worker.service --property=MainPID --value)"
-            echo "Worker uptime: $(systemctl show simple-worker.service --property=ActiveEnterTimestamp --value)"
+              echo ""
+              echo "=== Restart worker service ==="
+              systemctl restart simple-worker.service
+              sleep 5
 
-            echo ""
-            echo "=== Deploy complete ==="
-            echo "Commit: $(git rev-parse HEAD)"
-            echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo ""
+              echo "=== Verify worker is running ==="
+              systemctl is-active simple-worker.service
+              echo "Worker PID: $(systemctl show simple-worker.service --property=MainPID --value)"
+
+              echo ""
+              echo "=== Deploy complete ==="
+              echo "Commit: $(git rev-parse HEAD)"
+              echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            '
+
+  verify_deploy:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_AA4E9EC299D1433D9FF12541F06BA50D }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_AE01A735F8B046C49C5F169706AC5842 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_8E4F3767CE0647AEAA62C4C721F843FE }}
+
+      - name: Verify Worker VM commit
+        run: |
+          EXPECTED_COMMIT="${{ github.sha }}"
+          echo "Expected commit: $EXPECTED_COMMIT"
+          RESULT=$(az vm run-command invoke \
+            --resource-group rg-vdp-kyogoku \
+            --name aitherhubVm \
+            --command-id RunShellScript \
+            --scripts 'cd /var/www/aitherhub && git rev-parse HEAD && systemctl is-active simple-worker.service' \
+            --query 'value[0].message' -o tsv)
+          echo "VM result: $RESULT"
+          DEPLOYED_COMMIT=$(echo "$RESULT" | grep -oP '[a-f0-9]{40}' | head -1)
+          echo "Deployed commit: $DEPLOYED_COMMIT"
+          if [ "$DEPLOYED_COMMIT" = "$EXPECTED_COMMIT" ]; then
+            echo "SUCCESS: Worker VM commit matches expected commit"
+          else
+            echo "WARNING: Commit mismatch. Expected=$EXPECTED_COMMIT Got=$DEPLOYED_COMMIT"
+          fi
