@@ -541,6 +541,7 @@ def main():
         logger.info("[SPLIT] Starting: %d phases to process (total=%d, start_phase=%d)",
                     len(phases_to_process), total_phases, start_phase)
 
+        failed_phases = []
         for i, p in enumerate(phases_to_process):
             idx = p["phase_index"]
             time_start = p["time_start"]
@@ -562,12 +563,14 @@ def main():
                 time_end,
                 safe_seek=is_last_phase, 
             ):
-                logger.error("[CUT FAIL] phase=%s", idx)
-                break
+                logger.error("[CUT FAIL] phase=%s – skipping and continuing", idx)
+                failed_phases.append(idx)
+                continue
 
             if not os.path.exists(out_path):
-                logger.error("[CUT NO FILE] %s", out_path)
-                break
+                logger.error("[CUT NO FILE] %s – skipping and continuing", out_path)
+                failed_phases.append(idx)
+                continue
             else:
                 cut_elapsed = time.time() - phase_start
                 logger.info("[CUT OK] %s (%.2f MB, cut took %.1fs)",
@@ -579,8 +582,9 @@ def main():
 
                 dest = f"{blob_info['parent_path']}/reportvideo/{out_name}"
                 if not upload_to_blob(out_path, dest):
-                    logger.error("[UPLOAD FAIL] %s", out_path)
-                    break
+                    logger.error("[UPLOAD FAIL] %s – skipping and continuing", out_path)
+                    failed_phases.append(idx)
+                    continue
 
                 upload_elapsed = time.time() - upload_start
                 logger.info("[UPLOAD OK] %s (%.1fs)", out_path, upload_elapsed)
@@ -597,9 +601,13 @@ def main():
             logger.info("[PROGRESS] phase %d/%d done (total elapsed: %.1fs)",
                         i + 1, len(phases_to_process), total_elapsed)
 
+        # Always mark as done after processing all phases (even if some failed)
+        total_elapsed = time.time() - split_start_time
+        update_video_split_status_sync(video_id, "done")
+        if failed_phases:
+            logger.warning("[SPLIT DONE WITH ERRORS] %d/%d phases failed: %s (total: %.1fs)",
+                           len(failed_phases), len(phases_to_process), failed_phases, total_elapsed)
         else:
-            total_elapsed = time.time() - split_start_time
-            update_video_split_status_sync(video_id, "done")
             logger.info("[SPLIT DONE] %d phases in %.1fs (avg %.1fs/phase)",
                         len(phases_to_process), total_elapsed,
                         total_elapsed / max(len(phases_to_process), 1))
