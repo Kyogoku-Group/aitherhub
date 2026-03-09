@@ -6,6 +6,8 @@ on:
       - master
     paths:
       - 'worker/**'
+      - 'shared/**'
+      - 'deploy/**'
       - '.github/workflows/deploy_worker.yml'
   workflow_dispatch:
 
@@ -16,80 +18,88 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    name: Deploy Worker
-    permissions:
-      id-token: write
-      contents: read
+    name: Deploy Worker via SSH
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_AA4E9EC299D1433D9FF12541F06BA50D }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_AE01A735F8B046C49C5F169706AC5842 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_8E4F3767CE0647AEAA62C4C721F843FE }}
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.WORKER_SSH_KEY }}" > ~/.ssh/worker_key
+          chmod 600 ~/.ssh/worker_key
+          ssh-keyscan -H ${{ secrets.WORKER_SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Deploy to Worker VM
+        env:
+          SSH_HOST: ${{ secrets.WORKER_SSH_HOST }}
+          SSH_USER: ${{ secrets.WORKER_SSH_USER }}
         run: |
-          az vm run-command invoke \
-            --resource-group rg-vdp-kyogoku \
-            --name aitherhubVm \
-            --command-id RunShellScript \
-            --scripts '
-              set -e
-              export HOME=/home/azureuser
-              cd /var/www/aitherhub
+          ssh -i ~/.ssh/worker_key -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} << 'DEPLOY_SCRIPT'
+            set -e
 
-              echo "=== Pull latest code ==="
-              git config --global --add safe.directory /var/www/aitherhub
-              git fetch origin master
-              git reset --hard origin/master
-              echo "HEAD: $(git rev-parse HEAD)"
+            echo "=== AitherHub Worker Deploy ==="
+            echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+            cd /opt/aitherhub
+            git config --global --add safe.directory /opt/aitherhub
+            echo "Before: $(git rev-parse HEAD)"
+            git fetch origin master
+            git reset --hard origin/master
+            echo "After:  $(git rev-parse HEAD)"
+
+            if [ -f requirements.txt ]; then
               echo ""
-              echo "=== Restart worker service ==="
-              systemctl restart simple-worker.service
-              sleep 5
+              echo "=== Installing dependencies ==="
+              pip install -r requirements.txt --quiet
+            fi
 
-              echo ""
-              echo "=== Verify worker is running ==="
-              systemctl is-active simple-worker.service
-              echo "Worker PID: $(systemctl show simple-worker.service --property=MainPID --value)"
+            echo ""
+            echo "=== Restarting worker ==="
+            sudo systemctl restart aither-worker
+            sleep 5
 
-              echo ""
-              echo "=== Deploy complete ==="
-              echo "Commit: $(git rev-parse HEAD)"
-              echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            '
+            echo ""
+            echo "=== Worker status ==="
+            sudo systemctl is-active aither-worker
+            echo "Worker PID: $(systemctl show aither-worker --property=MainPID --value)"
 
-  verify_deploy:
-    needs: deploy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Login to Azure
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_AA4E9EC299D1433D9FF12541F06BA50D }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_AE01A735F8B046C49C5F169706AC5842 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_8E4F3767CE0647AEAA62C4C721F843FE }}
+            echo ""
+            echo "=== Deploy complete ==="
+            echo "Commit: $(git rev-parse HEAD)"
+          DEPLOY_SCRIPT
 
-      - name: Verify Worker VM commit
+      - name: Verify deployment
+        env:
+          SSH_HOST: ${{ secrets.WORKER_SSH_HOST }}
+          SSH_USER: ${{ secrets.WORKER_SSH_USER }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          EXPECTED_COMMIT="${{ github.sha }}"
-          echo "Expected commit: $EXPECTED_COMMIT"
-          RESULT=$(az vm run-command invoke \
-            --resource-group rg-vdp-kyogoku \
-            --name aitherhubVm \
-            --command-id RunShellScript \
-            --scripts 'cd /var/www/aitherhub && git rev-parse HEAD && systemctl is-active simple-worker.service' \
-            --query 'value[0].message' -o tsv)
-          echo "VM result: $RESULT"
-          DEPLOYED_COMMIT=$(echo "$RESULT" | grep -oP '[a-f0-9]{40}' | head -1)
-          echo "Deployed commit: $DEPLOYED_COMMIT"
-          if [ "$DEPLOYED_COMMIT" = "$EXPECTED_COMMIT" ]; then
-            echo "SUCCESS: Worker VM commit matches expected commit"
+          DEPLOYED=$(ssh -i ~/.ssh/worker_key -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} \
+            "cd /opt/aitherhub && git rev-parse HEAD")
+          echo "Expected: ${COMMIT_SHA}"
+          echo "Deployed: ${DEPLOYED}"
+          if [ "${DEPLOYED}" = "${COMMIT_SHA}" ]; then
+            echo "SUCCESS: Commit matches"
           else
-            echo "WARNING: Commit mismatch. Expected=$EXPECTED_COMMIT Got=$DEPLOYED_COMMIT"
+            echo "WARNING: Commit mismatch"
+            exit 1
           fi
+
+      - name: Health check
+        env:
+          SSH_HOST: ${{ secrets.WORKER_SSH_HOST }}
+          SSH_USER: ${{ secrets.WORKER_SSH_USER }}
+        run: |
+          HEALTH=$(ssh -i ~/.ssh/worker_key -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} \
+            "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health || echo 'no_health_endpoint'")
+          echo "Health check result: ${HEALTH}"
+          if [ "${HEALTH}" = "200" ]; then
+            echo "SUCCESS: Worker health OK"
+          else
+            echo "INFO: Health endpoint returned ${HEALTH} (worker may not have health endpoint yet)"
+          fi
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/worker_key
