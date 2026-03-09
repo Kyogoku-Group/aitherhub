@@ -16,12 +16,21 @@ httpx>=0.25.0
 requests>=2.31.0
 openai>=1.0.0
 
-# --- Data / ML ---
+# --- ML / Vision ---
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# --- Audio / Transcription ---
+faster-whisper>=1.0.0
+
+# --- Data / Image ---
 numpy>=1.26.0
 opencv-python-headless>=4.8.0
-pyyaml>=6.0
+pillow>=10.0.0
 
 # --- Utilities ---
 python-decouple>=3.8
 python-dotenv>=1.0.0
 loguru>=0.7.0
+pyyaml>=6.0
