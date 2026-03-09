@@ -1,0 +1,51 @@
+name: Deploy Worker to VM
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy_worker.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy Worker
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Worker VM
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.WORKER_HOST }}
+          username: azureuser
+          key: ${{ secrets.WORKER_SSH_KEY }}
+          script_stop: true
+          command_timeout: 5m
+          script: |
+            set -e
+
+            echo "=== Pull latest code ==="
+            cd /var/www/aitherhub
+            git fetch origin master
+            git reset --hard origin/master
+            echo "HEAD: $(git rev-parse HEAD)"
+
+            echo ""
+            echo "=== Restart worker service ==="
+            sudo systemctl restart simple-worker.service
+            sleep 5
+
+            echo ""
+            echo "=== Verify worker is running ==="
+            sudo systemctl is-active simple-worker.service
+            echo "Worker PID: $(systemctl show simple-worker.service --property=MainPID --value)"
+            echo "Worker uptime: $(systemctl show simple-worker.service --property=ActiveEnterTimestamp --value)"
+
+            echo ""
+            echo "=== Deploy complete ==="
+            echo "Commit: $(git rev-parse HEAD)"
+            echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
