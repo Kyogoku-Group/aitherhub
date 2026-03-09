@@ -157,7 +157,8 @@ def extract_frames(
     )
 
     # --- Stall detection: if no new frames for STALL_TIMEOUT seconds, kill ffmpeg ---
-    STALL_TIMEOUT = 120  # 2 minutes with no progress = stalled
+    # Scale timeout based on video duration: long videos may have slow initial seek
+    STALL_TIMEOUT = max(120, min(int(duration / 10), 300))  # 120s-300s based on duration
     _stall_detected = {"value": False}
 
     if on_progress and expected_frames > 0:
@@ -201,15 +202,27 @@ def extract_frames(
 
     proc.wait()
 
-    if _stall_detected["value"]:
+    # GPU stall → treat as GPU failure and fall through to CPU fallback
+    if _stall_detected["value"] and use_gpu:
+        logger.warning(
+            "[FRAMES] GPU decode stalled after %d/%d frames. Falling back to CPU.",
+            len([f for f in os.listdir(out_dir) if f.endswith('.jpg')]),
+            expected_frames,
+        )
+        # Clean partial GPU output before CPU retry
+        for f in os.listdir(out_dir):
+            if f.endswith('.jpg'):
+                os.remove(os.path.join(out_dir, f))
+    elif _stall_detected["value"] and not use_gpu:
+        # CPU path stalled — this is a real failure
         raise RuntimeError(
             f"[FRAMES] ffmpeg stalled (no new frames for {STALL_TIMEOUT}s). "
-            f"Likely disk full. Extracted {len([f for f in os.listdir(out_dir) if f.endswith('.jpg')])} "
+            f"Extracted {len([f for f in os.listdir(out_dir) if f.endswith('.jpg')])} "
             f"of {expected_frames} expected frames."
         )
 
-    # If GPU failed, fallback to CPU
-    if proc.returncode != 0 and use_gpu:
+    # If GPU failed (error or stall), fallback to CPU
+    if (proc.returncode != 0 or _stall_detected["value"]) and use_gpu:
         stderr_out = proc.stderr.read().decode(errors='replace') if proc.stderr else ''
         logger.warning("[FRAMES] GPU decode failed (rc=%d), falling back to CPU. stderr: %s",
                        proc.returncode, stderr_out[:500])
