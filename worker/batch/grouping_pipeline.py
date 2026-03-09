@@ -35,9 +35,24 @@ def get_group_file(art_root: str, video_id: str):
 
 COSINE_THRESHOLD = 0.88
 
-AZURE_OPENAI_ENDPOINT_EMBED=env("AZURE_OPENAI_ENDPOINT_EMBED")
-AZURE_OPENAI_API_VERSION_EMBED=env("AZURE_OPENAI_API_VERSION_EMBED")
+# Fallback: use main Azure OpenAI endpoint/version if EMBED-specific ones are not set
+_raw_endpoint = env("AZURE_OPENAI_ENDPOINT", "")
+# Strip /openai/responses?api-version=... suffix if present (embed needs base URL)
+_base_endpoint = _raw_endpoint.split("/openai/")[0] if "/openai/" in _raw_endpoint else _raw_endpoint
 
+AZURE_OPENAI_ENDPOINT_EMBED = env("AZURE_OPENAI_ENDPOINT_EMBED") or _base_endpoint
+AZURE_OPENAI_API_VERSION_EMBED = env("AZURE_OPENAI_API_VERSION_EMBED") or env("GPT5_API_VERSION", "2025-04-01-preview")
+
+if not AZURE_OPENAI_ENDPOINT_EMBED:
+    raise RuntimeError(
+        "AZURE_OPENAI_ENDPOINT_EMBED (or AZURE_OPENAI_ENDPOINT) must be set. "
+        "Please add it to .env"
+    )
+if not AZURE_OPENAI_API_VERSION_EMBED:
+    raise RuntimeError(
+        "AZURE_OPENAI_API_VERSION_EMBED (or GPT5_API_VERSION) must be set. "
+        "Please add it to .env"
+    )
 
 embed_client = AzureOpenAI(
     api_key=AZURE_OPENAI_KEY,

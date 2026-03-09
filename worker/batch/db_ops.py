@@ -16,15 +16,53 @@ from sqlalchemy import text
 load_dotenv()
 
 # Database configuration
+# ─────────────────────────────────────────────────────────────────
+# asyncpg does NOT support the `sslmode` query parameter that
+# psycopg2/libpq uses.  If DATABASE_URL contains `?sslmode=require`
+# we must strip it and pass an ssl.SSLContext via connect_args.
+# ─────────────────────────────────────────────────────────────────
+import ssl as _ssl
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set in environment")
 
+def _prepare_database_url(url: str):
+    """Strip sslmode from URL and return (cleaned_url, connect_args)."""
+    parsed = urlparse(url)
+    qp = parse_qs(parsed.query)
+    connect_args = {}
+    if "sslmode" in qp:
+        mode = qp.pop("sslmode")[0]
+        if mode == "require":
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            connect_args["ssl"] = ctx
+        elif mode in ("verify-ca", "verify-full"):
+            connect_args["ssl"] = _ssl.create_default_context()
+    # Also handle `ssl=require` (already converted in .env)
+    if "ssl" in qp:
+        mode = qp.pop("ssl")[0]
+        if mode == "require":
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            connect_args["ssl"] = ctx
+    new_query = urlencode(qp, doseq=True)
+    cleaned = urlunparse((parsed.scheme, parsed.netloc, parsed.path,
+                          parsed.params, new_query, parsed.fragment))
+    return cleaned, connect_args
+
+_cleaned_url, _connect_args = _prepare_database_url(DATABASE_URL)
+
 # Create async engine
 engine = create_async_engine(
-    DATABASE_URL,
+    _cleaned_url,
     pool_pre_ping=True,
     echo=False,
+    connect_args=_connect_args,
 )
 
 AsyncSessionLocal = sessionmaker(
