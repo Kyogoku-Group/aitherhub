@@ -64,6 +64,23 @@ if not FFMPEG:
 #     raise RuntimeError("ffprobe not found")
 
 # =====================
+# GPU DETECTION
+# =====================
+def _has_nvenc() -> bool:
+    """Check if h264_nvenc encoder is available."""
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "h264_nvenc" in result.stdout
+    except Exception:
+        return False
+
+HAS_NVENC = _has_nvenc()
+logger.info("[GPU] NVENC available: %s", HAS_NVENC)
+
+# =====================
 # PATHS
 # =====================
 ART_ROOT = "output"
@@ -201,9 +218,12 @@ def cut_segment(
     """Cut a segment from the source video.
 
     Strategy (fast → slow fallback):
-      1. Stream-copy with -ss before -i  (fastest, ~seconds)
-      2. Stream-copy with -ss after  -i  (slower seek but still no re-encode)
-      3. Re-encode with libx264           (slowest, only if copy fails)
+      1. GPU re-encode with h264_nvenc  (fast + accurate + small files)
+      2. CPU re-encode with libx264     (fallback if GPU unavailable/fails)
+
+    NOTE: stream-copy (-c copy) was removed because it produces
+    oversized files when keyframe intervals are long, which is common
+    with screen recordings and long-form video.
     """
     logger.info(
         "[CUT] %s | %.2f -> %.2f | out=%s | safe_seek=%s",
@@ -218,62 +238,45 @@ def cut_segment(
     if duration <= 0:
         return False
 
-    # --- Attempt 1: Fast stream-copy (-ss before -i) ---
-    fast_copy_cmd = [
-        FFMPEG, "-y",
-        "-ss", str(start_sec),
-        "-i", input_path,
-        "-t", str(duration),
-        "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c", "copy",
-        "-movflags", "+faststart",
-        out_path,
-    ]
-
-    try:
-        subprocess.run(fast_copy_cmd, check=True, capture_output=True, text=True)
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            logger.info(
-                "[CUT OK] stream-copy (fast): %s (%.2f MB)",
-                out_path,
-                os.path.getsize(out_path) / 1024 / 1024,
+    # --- Attempt 1: GPU re-encode with h264_nvenc ---
+    if HAS_NVENC:
+        gpu_cmd = [
+            FFMPEG, "-y",
+            "-hwaccel", "cuda",
+            "-ss", str(start_sec),
+            "-i", input_path,
+            "-t", str(duration),
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-rc", "vbr",
+            "-cq", str(crf),
+            "-b:v", "0",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            out_path,
+        ]
+        try:
+            subprocess.run(gpu_cmd, check=True, capture_output=True, text=True)
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                logger.info(
+                    "[CUT OK] GPU h264_nvenc: %s (%.2f MB)",
+                    out_path,
+                    os.path.getsize(out_path) / 1024 / 1024,
+                )
+                return True
+        except subprocess.CalledProcessError as e:
+            logger.warning(
+                "[CUT] GPU h264_nvenc failed, falling back to CPU: %s",
+                e.stderr[:300] if e.stderr else "",
             )
-            return True
-    except subprocess.CalledProcessError as e:
-        logger.warning("[CUT] stream-copy (fast) failed, trying slow copy: %s", e.stderr[:200] if e.stderr else "")
-        if os.path.exists(out_path):
-            os.remove(out_path)
+            if os.path.exists(out_path):
+                os.remove(out_path)
 
-    # --- Attempt 2: Slow stream-copy (-ss after -i, more accurate) ---
-    slow_copy_cmd = [
-        FFMPEG, "-y",
-        "-i", input_path,
-        "-ss", str(start_sec),
-        "-t", str(duration),
-        "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c", "copy",
-        "-movflags", "+faststart",
-        out_path,
-    ]
-
-    try:
-        subprocess.run(slow_copy_cmd, check=True, capture_output=True, text=True)
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            logger.info(
-                "[CUT OK] stream-copy (slow): %s (%.2f MB)",
-                out_path,
-                os.path.getsize(out_path) / 1024 / 1024,
-            )
-            return True
-    except subprocess.CalledProcessError as e:
-        logger.warning("[CUT] stream-copy (slow) failed, falling back to re-encode: %s", e.stderr[:200] if e.stderr else "")
-        if os.path.exists(out_path):
-            os.remove(out_path)
-
-    # --- Attempt 3: Re-encode fallback (slowest but most compatible) ---
-    logger.info("[CUT] Falling back to re-encode for %.2f-%.2f", start_sec, end_sec)
+    # --- Attempt 2: CPU re-encode with libx264 (fallback) ---
+    logger.info("[CUT] Using CPU libx264 for %.2f-%.2f", start_sec, end_sec)
 
     if safe_seek:
         reencode_cmd = [
@@ -305,7 +308,7 @@ def cut_segment(
         subprocess.run(reencode_cmd, check=True, capture_output=True, text=True)
         if os.path.exists(out_path):
             logger.info(
-                "[CUT OK] re-encode: %s (%.2f MB)",
+                "[CUT OK] CPU re-encode: %s (%.2f MB)",
                 out_path,
                 os.path.getsize(out_path) / 1024 / 1024,
             )
