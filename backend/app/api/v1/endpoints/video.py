@@ -4513,3 +4513,97 @@ async def get_asset_history(
     except Exception as exc:
         logger.exception(f"[asset-history] Unexpected error: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+
+# =========================================================
+# Retry Analysis API (user-facing)
+# =========================================================
+
+@router.post("/{video_id}/retry-analysis")
+async def retry_analysis(
+    video_id: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """
+    Re-enqueue a failed video for analysis without re-uploading.
+    The uploaded video asset is preserved in Blob storage.
+    Only the analysis job is re-submitted.
+    """
+    try:
+        user_id = user.get("user_id") or user.get("id")
+
+        # Verify video exists and belongs to user
+        sql = text("""
+            SELECT v.id, v.original_filename, v.status, v.user_id,
+                   u.email as user_email
+            FROM videos v
+            LEFT JOIN users u ON v.user_id = u.id
+            WHERE v.id = :vid
+        """)
+        result = await db.execute(sql, {"vid": video_id})
+        row = result.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Video not found")
+        if str(row.user_id) != str(user_id):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        # Only allow retry for ERROR or stuck states
+        allowed_statuses = ("ERROR", "error", "uploaded", "UPLOADED")
+        if row.status not in allowed_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot retry: video status is '{row.status}'. "
+                       f"Retry is only available for failed or stuck videos.",
+            )
+
+        # Generate fresh SAS URL for the existing blob
+        from app.services.storage_service import generate_download_sas
+        download_url, expiry = await generate_download_sas(
+            email=row.user_email,
+            video_id=str(row.id),
+            filename=row.original_filename,
+            expires_in_minutes=1440,  # 24 hours
+        )
+
+        # Reset status to 'uploaded' (pre-analysis state)
+        await db.execute(
+            text("""
+                UPDATE videos
+                SET status = 'uploaded',
+                    step_progress = 0,
+                    error_message = NULL
+                WHERE id = :vid
+            """),
+            {"vid": video_id},
+        )
+        await db.commit()
+
+        # Enqueue analysis job
+        from app.services.queue_service import enqueue_job
+        await enqueue_job({
+            "video_id": str(row.id),
+            "blob_url": download_url,
+            "original_filename": row.original_filename,
+        })
+
+        logger.info(
+            f"[retry-analysis] User {user_id} retried analysis for video {video_id} "
+            f"(was: {row.status})"
+        )
+
+        return {
+            "success": True,
+            "video_id": video_id,
+            "message": "解析を再開しました。動画データはそのまま保持されています。",
+            "new_status": "uploaded",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(f"[retry-analysis] Failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"解析の再試行に失敗しました: {exc}")

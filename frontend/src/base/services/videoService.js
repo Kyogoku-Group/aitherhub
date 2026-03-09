@@ -1381,5 +1381,21 @@ class VideoService extends BaseApiService {
       return { feedback: [], count: 0 };
     }
   }
+
+  /**
+   * Retry analysis for a failed video without re-uploading.
+   * The uploaded video asset is preserved in Blob storage.
+   * @param {string} videoId - The video ID to retry analysis for
+   * @returns {Promise<{success: boolean, video_id: string, message: string, new_status: string}>}
+   */
+  async retryAnalysis(videoId) {
+    try {
+      const response = await this.post(`/api/v1/videos/${videoId}/retry-analysis`);
+      return response;
+    } catch (error) {
+      console.error('Failed to retry analysis:', error);
+      throw error;
+    }
+  }
 }
 export default new VideoService();

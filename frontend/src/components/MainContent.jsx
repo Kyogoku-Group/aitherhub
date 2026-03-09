@@ -1186,14 +1186,43 @@ export default function MainContent({
             <div className="w-full flex flex-col items-center justify-center">
               <div className="w-full max-w-md mx-auto">
                 <div className="rounded-2xl p-8 border transition-all duration-200 border-red-300/30 bg-red-500/10 backdrop-blur-sm">
-                  <div className="flex flex-col items-center text-center space-y-3">
+                  <div className="flex flex-col items-center text-center space-y-4">
                     <div className="text-4xl">⚠️</div>
                     <p className="text-base font-semibold text-red-200">
                       {window.__t('errorAnalysisMessage') || '解析中にエラーが発生しました。'}
                     </p>
-                    <p className="text-sm text-gray-200">
-                      {videoData.original_filename || ''}
+                    <p className="text-sm text-gray-300">
+                      動画データは保存されています。解析のみ再試行できます。
                     </p>
+                    <p className="text-xs text-gray-400">
+                      {videoData.original_filename || ''}
+                      {videoData.error_message ? ` — ${videoData.error_message}` : ''}
+                    </p>
+                    {/* Primary: Retry Analysis */}
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        try {
+                          const btn = e.currentTarget;
+                          btn.disabled = true;
+                          btn.textContent = '再試行中...';
+                          await VideoService.retryAnalysis(videoData.id);
+                          // Reset to processing state
+                          setVideoData({ ...videoData, status: 'uploaded' });
+                          toast({ title: '解析を再開しました', description: '動画データはそのまま保持されています。' });
+                        } catch (err) {
+                          console.error('Retry analysis failed:', err);
+                          toast({ title: '再試行に失敗しました', description: err?.message || 'しばらくしてからもう一度お試しください。', variant: 'destructive' });
+                          e.currentTarget.disabled = false;
+                          e.currentTarget.textContent = '解析を再試行';
+                        }
+                      }}
+                      className="mt-2 px-6 py-3 text-sm text-white bg-[#7D01FF] rounded-lg hover:bg-[#6B00DD] transition-colors cursor-pointer shadow-sm font-semibold"
+                    >
+                      解析を再試行
+                    </button>
+                    {/* Secondary: New Upload */}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1213,7 +1242,7 @@ export default function MainContent({
                         setDuplicateVideo(null);
                         navigate('/');
                       }}
-                      className="mt-3 px-6 py-3 text-sm text-[#7D01FF] border-2 border-[#7D01FF] rounded-lg hover:bg-purple-50 transition-colors cursor-pointer bg-white shadow-sm"
+                      className="px-6 py-2 text-xs text-gray-400 border border-gray-600 rounded-lg hover:bg-gray-800 transition-colors cursor-pointer"
                     >
                       + {window.__t('newUploadButton') || '新しい動画をアップロード'}
                     </button>
