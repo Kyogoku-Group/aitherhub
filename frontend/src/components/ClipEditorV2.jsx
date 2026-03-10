@@ -89,22 +89,44 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
   const [isTrimming, setIsTrimming] = useState(false);
   const [status, setStatus] = useState(null);
   const [captions, setCaptions] = useState([]);
-  const [editCapIdx, setEditCapIdx] = useState(null);
   const [savingCaps, setSavingCaps] = useState(false);
 
   const clipDur = trimEnd - trimStart;
 
+  // Determine if we're playing a clip_url (local time 0-based) or full video
+  const isClipVideo = !!(clip?.clip_url);
   const videoUrl = useMemo(() => {
     return clip?.clip_url || videoData?.video_url || clip?.video_url || null;
   }, [videoData, clip]);
 
-  // Current caption based on playback time
+  // ─── Time offset logic ────────────────────────────────────────
+  // When playing clip_url: video currentTime is 0-based (clip local time)
+  // Captions have absolute times (e.g., 428s for 7:08)
+  // We need to convert: absoluteTime -> localTime by subtracting origStart
+  // When playing full video: no offset needed
+
+  // Convert caption absolute time to video-local time for matching
+  const toLocalTime = useCallback((absTime) => {
+    if (!isClipVideo) return absTime;
+    return absTime - origStart;
+  }, [isClipVideo, origStart]);
+
+  // Convert video-local time to absolute time for display
+  const toAbsTime = useCallback((localTime) => {
+    if (!isClipVideo) return localTime;
+    return localTime + origStart;
+  }, [isClipVideo, origStart]);
+
+  // Current caption based on playback time (with offset correction)
   const currentCaption = useMemo(() => {
     if (!captions.length) return null;
-    return captions.find(
-      (c) => currentTime >= (c.start || 0) && currentTime <= (c.end || c.start + 3)
-    );
-  }, [captions, currentTime]);
+    const t = currentTime;
+    return captions.find((c) => {
+      const localStart = toLocalTime(c.start || 0);
+      const localEnd = toLocalTime(c.end || (c.start + 5));
+      return t >= localStart && t <= localEnd;
+    });
+  }, [captions, currentTime, toLocalTime]);
 
   const currentPhase = useMemo(() => {
     if (!segments.length) return null;
@@ -158,8 +180,9 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
     for (const phase of matchingPhases) {
       const txt = phase.audio_text || phase.description;
       if (!txt) continue;
-      const pStart = phase.time_start ?? tStart;
-      const pEnd = phase.time_end ?? tEnd;
+      // Clamp phase times to clip range
+      const pStart = Math.max(phase.time_start ?? tStart, tStart);
+      const pEnd = Math.min(phase.time_end ?? tEnd, tEnd);
 
       // Split text into sentences
       const sentences = txt.split(/[。！？\n]/).map((s) => s.trim()).filter(Boolean);
@@ -501,24 +524,26 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
                 style={{
                   position: "absolute",
                   bottom: 40,
-                  left: 12,
-                  right: 12,
+                  left: 8,
+                  right: 8,
                   textAlign: "center",
                   pointerEvents: "none",
+                  zIndex: 10,
                 }}
               >
                 <span
                   style={{
                     display: "inline-block",
-                    padding: "6px 16px",
-                    borderRadius: 6,
-                    backgroundColor: "rgba(0,0,0,0.75)",
+                    padding: "8px 18px",
+                    borderRadius: 8,
+                    backgroundColor: "rgba(0,0,0,0.80)",
                     color: currentCaption.emphasis ? C.yellow : "#fff",
-                    fontSize: 18,
+                    fontSize: 16,
                     fontWeight: currentCaption.emphasis ? 800 : 600,
-                    lineHeight: 1.4,
-                    maxWidth: "90%",
-                    textShadow: "0 1px 4px rgba(0,0,0,0.8)",
+                    lineHeight: 1.5,
+                    maxWidth: "95%",
+                    textShadow: "0 2px 6px rgba(0,0,0,0.9)",
+                    letterSpacing: 0.3,
                   }}
                 >
                   {currentCaption.text}
@@ -718,6 +743,9 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
             {tab === "captions" && (
               <div>
                 <SectionTitle>字幕編集</SectionTitle>
+                <p style={{ color: C.textMuted, fontSize: 11, margin: "0 0 10px", lineHeight: 1.5 }}>
+                  テキストをクリックして編集できます。タイムスタンプをクリックするとその位置にジャンプします。
+                </p>
                 {captions.length === 0 ? (
                   <div
                     style={{
@@ -734,72 +762,74 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
                     クリップを再生成すると自動字幕が追加されます。
                   </div>
                 ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                    {captions.map((cap, i) => (
-                      <div
-                        key={i}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          padding: "6px 10px",
-                          backgroundColor: C.surfaceLight,
-                          borderRadius: 5,
-                          border: editCapIdx === i ? `1px solid ${C.accent}` : "1px solid transparent",
-                        }}
-                      >
-                        <span
-                          onClick={() => seek(cap.start)}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {captions.map((cap, i) => {
+                      const isActive = currentCaption === cap;
+                      return (
+                        <div
+                          key={i}
                           style={{
-                            color: C.accent,
-                            fontSize: 11,
-                            minWidth: 42,
-                            fontWeight: 600,
-                            cursor: "pointer",
+                            display: "flex",
+                            gap: 8,
+                            padding: "8px 10px",
+                            backgroundColor: isActive ? C.accent + "18" : C.surfaceLight,
+                            borderRadius: 6,
+                            border: isActive ? `1px solid ${C.accent}55` : `1px solid transparent`,
+                            transition: "all 0.2s ease",
                           }}
                         >
-                          {fmt(cap.start)}
-                        </span>
-                        {editCapIdx === i ? (
-                          <input
-                            type="text"
+                          <span
+                            onClick={() => {
+                              const localT = toLocalTime(cap.start);
+                              seek(Math.max(0, localT));
+                            }}
+                            style={{
+                              color: C.accent,
+                              fontSize: 11,
+                              minWidth: 42,
+                              fontWeight: 600,
+                              cursor: "pointer",
+                              paddingTop: 3,
+                              flexShrink: 0,
+                            }}
+                          >
+                            {fmt(cap.start)}
+                          </span>
+                          <textarea
                             value={cap.text}
                             onChange={(e) => editCap(i, e.target.value)}
-                            onBlur={() => setEditCapIdx(null)}
-                            onKeyDown={(e) => e.key === "Enter" && setEditCapIdx(null)}
-                            autoFocus
+                            rows={2}
                             style={{
                               flex: 1,
-                              padding: "3px 6px",
+                              padding: "4px 8px",
                               backgroundColor: C.bg,
-                              border: `1px solid ${C.accent}`,
-                              borderRadius: 4,
-                              color: C.text,
-                              fontSize: 13,
-                              outline: "none",
-                            }}
-                          />
-                        ) : (
-                          <span
-                            onClick={() => setEditCapIdx(i)}
-                            style={{
-                              flex: 1,
+                              border: `1px solid ${C.border}`,
+                              borderRadius: 5,
                               color: cap.emphasis ? C.yellow : C.text,
                               fontSize: 13,
                               fontWeight: cap.emphasis ? 700 : 400,
-                              cursor: "text",
+                              lineHeight: 1.5,
+                              outline: "none",
+                              resize: "vertical",
+                              minHeight: 36,
+                              fontFamily: "inherit",
+                              transition: "border-color 0.2s ease",
                             }}
-                          >
-                            {cap.text}
-                          </span>
-                        )}
-                      </div>
-                    ))}
+                            onFocus={(e) => {
+                              e.target.style.borderColor = C.accent;
+                            }}
+                            onBlur={(e) => {
+                              e.target.style.borderColor = C.border;
+                            }}
+                          />
+                        </div>
+                      );
+                    })}
                     <button
                       onClick={saveCaps}
                       disabled={savingCaps}
                       style={{
-                        padding: "9px 20px",
+                        padding: "10px 20px",
                         border: "none",
                         borderRadius: 8,
                         backgroundColor: C.green,
