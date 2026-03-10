@@ -17,7 +17,7 @@ import uuid
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -34,7 +34,7 @@ router = APIRouter()
 
 # ① Clip Rating
 class ClipRatingRequest(BaseModel):
-    phase_index: int = Field(..., description="Phase index")
+    phase_index: Union[int, str] = Field(..., description="Phase index (int or string)")
     time_start: float = Field(..., description="Clip start time in seconds")
     time_end: float = Field(..., description="Clip end time in seconds")
     rating: str = Field(..., description="'good' or 'bad'")
@@ -82,7 +82,7 @@ class EditLogResponse(BaseModel):
 
 # ③ Sales Confirmation
 class SalesConfirmationRequest(BaseModel):
-    phase_index: int = Field(..., description="Phase index")
+    phase_index: Union[int, str] = Field(..., description="Phase index (int or string)")
     time_start: float = Field(..., description="Clip start time in seconds")
     time_end: float = Field(..., description="Clip end time in seconds")
     is_sales_moment: bool = Field(..., description="True if this is a selling moment")

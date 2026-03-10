@@ -14,7 +14,7 @@ This data is the training signal for the future Clip Rank AI model.
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -30,7 +30,7 @@ router = APIRouter()
 # ─── Schemas ─────────────────────────────────────────────────────────────────
 
 class ClipFeedbackRequest(BaseModel):
-    phase_index: int = Field(..., description="Phase index (matches video_phases.phase_index)")
+    phase_index: Union[int, str] = Field(..., description="Phase index (matches video_phases.phase_index)")
     time_start: float = Field(..., description="Clip start time in seconds")
     time_end: float = Field(..., description="Clip end time in seconds")
     feedback: str = Field(..., description="'adopted' or 'rejected'")
