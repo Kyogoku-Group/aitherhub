@@ -134,23 +134,78 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
     })();
   }, [videoId]);
 
+  // Helper: build subtitle-like captions from phase audio_text or description
+  const buildCaptionsFromPhases = useCallback((phases, clipData) => {
+    if (!phases || !clipData) return [];
+    const phaseIdx = clipData.phase_index;
+    const tStart = clipData.time_start || 0;
+    const tEnd = clipData.time_end || 0;
+
+    // Find matching phase(s) for this clip's time range
+    const matchingPhases = phases.filter((p) => {
+      const pStart = p.time_start ?? 0;
+      const pEnd = p.time_end ?? 0;
+      return pStart < tEnd && pEnd > tStart;
+    });
+
+    // If no matching phases, try exact phase_index match
+    if (matchingPhases.length === 0) {
+      const exact = phases.find((p) => p.phase_index === phaseIdx);
+      if (exact) matchingPhases.push(exact);
+    }
+
+    const result = [];
+    for (const phase of matchingPhases) {
+      const txt = phase.audio_text || phase.description;
+      if (!txt) continue;
+      const pStart = phase.time_start ?? tStart;
+      const pEnd = phase.time_end ?? tEnd;
+
+      // Split text into sentences
+      const sentences = txt.split(/[。！？\n]/).map((s) => s.trim()).filter(Boolean);
+      if (sentences.length === 0) {
+        result.push({ start: pStart, end: pEnd, text: txt.trim() });
+      } else {
+        const dur = pEnd - pStart;
+        const perSentence = dur / sentences.length;
+        sentences.forEach((sent, i) => {
+          result.push({
+            start: Math.round((pStart + i * perSentence) * 100) / 100,
+            end: Math.round((pStart + (i + 1) * perSentence) * 100) / 100,
+            text: sent,
+          });
+        });
+      }
+    }
+    return result;
+  }, []);
+
   useEffect(() => {
     if (clip?.captions && clip.captions.length > 0) {
       setCaptions(clip.captions);
-    } else if (videoId && clip?.phase_index != null) {
-      // Captions not included in clip object — fetch from API
-      (async () => {
-        try {
-          const res = await VideoService.getClipStatus(videoId, clip.phase_index);
-          if (res?.captions && res.captions.length > 0) {
-            setCaptions(res.captions);
-          }
-        } catch (e) {
-          console.warn("Failed to fetch clip captions:", e);
-        }
-      })();
+      return;
     }
-  }, [clip, videoId]);
+    if (!videoId || clip?.phase_index == null) return;
+
+    // Captions not included in clip object — fetch from API
+    (async () => {
+      try {
+        const res = await VideoService.getClipStatus(videoId, clip.phase_index);
+        if (res?.captions && res.captions.length > 0) {
+          setCaptions(res.captions);
+          return;
+        }
+      } catch (e) {
+        console.warn("Failed to fetch clip captions:", e);
+      }
+
+      // Fallback: generate captions from timeline phase audio_text
+      if (timelineData?.phases?.length > 0) {
+        const fallback = buildCaptionsFromPhases(timelineData.phases, clip);
+        if (fallback.length > 0) setCaptions(fallback);
+      }
+    })();
+  }, [clip, videoId, timelineData, buildCaptionsFromPhases]);
 
   // ─── Video Handlers ────────────────────────────────────────────
   const onTimeUpdate = useCallback(() => {
@@ -336,14 +391,14 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
         {/* ─── LEFT: Video ─── */}
         <div
           style={{
-            flexShrink: 0,
+            flex: 1,
+            minWidth: 0,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             backgroundColor: "#000",
             position: "relative",
             overflow: "hidden",
-            /* Key fix: use aspect-ratio to constrain width based on available height */
           }}
         >
           {/* Inner container maintains 9:16 aspect ratio, height-based */}
@@ -352,7 +407,7 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
               position: "relative",
               height: "100%",
               aspectRatio: "9 / 16",
-              maxWidth: "45vw",
+              maxWidth: "100%",
               backgroundColor: "#000",
             }}
           >

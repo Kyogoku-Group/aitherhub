@@ -66,6 +66,7 @@ from db_ops import (
     get_video_status_sync,
     load_video_phases_sync,
     update_video_phase_description_sync,
+    update_video_phase_audio_text_sync,
     update_video_phase_csv_metrics_sync,
     update_video_phase_cta_score_sync,
     update_video_phase_audio_features_sync,
@@ -880,6 +881,23 @@ def main():
                 audio_text_dir=atd,
                 video_id=video_id,
             )
+
+            # --- Persist audio_text (speech_text) to DB ---
+            logger.info("[DB] Persist audio_text (speech_text) to video_phases")
+            audio_text_count = 0
+            for p in phase_units:
+                speech = p.get("speech_text")
+                if speech and str(speech).strip():
+                    try:
+                        update_video_phase_audio_text_sync(
+                            video_id=video_id,
+                            phase_index=p["phase_index"],
+                            audio_text=str(speech).strip(),
+                        )
+                        audio_text_count += 1
+                    except Exception as e:
+                        logger.warning("[DB][WARN] audio_text save failed phase %s: %s", p["phase_index"], e)
+            logger.info("[DB] Saved audio_text for %d/%d phases", audio_text_count, len(phase_units))
 
             # --- CLEANUP: Remove frames and audio to free disk space ---
             # Frames are no longer needed after STEP 5 (product detection uses them later,

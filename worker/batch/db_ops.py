@@ -289,6 +289,34 @@ def update_video_phase_description_sync(*args, **kwargs):
     return loop.run_until_complete(update_video_phase_description(*args, **kwargs))
 
 
+# ---------- STEP 5.5: persist audio_text (speech_text) to video_phases ----------
+async def update_video_phase_audio_text(
+    video_id: str,
+    phase_index: int,
+    audio_text: str,
+):
+    sql = text("""
+        UPDATE video_phases
+        SET audio_text = :audio_text,
+            updated_at = now()
+        WHERE video_id = :video_id
+          AND phase_index = :phase_index
+    """)
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(sql, {
+            "video_id": video_id,
+            "phase_index": phase_index,
+            "audio_text": audio_text,
+        })
+        await session.commit()
+
+
+def update_video_phase_audio_text_sync(*args, **kwargs):
+    loop = get_event_loop()
+    return loop.run_until_complete(update_video_phase_audio_text(*args, **kwargs))
+
+
 # ---------- STEP 7: upsert phase_groups + update video_phases ----------
 async def get_all_phase_groups(user_id: int):
     """
