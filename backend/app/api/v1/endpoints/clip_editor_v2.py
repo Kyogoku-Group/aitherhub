@@ -679,46 +679,58 @@ async def transcribe_clip(
         _cleanup_tmp(tmp_dir)
         raise HTTPException(status_code=400, detail=f"Failed to download clip video: {str(e)}")
 
-    # Step 2: Send to OpenAI Whisper API
+    # Step 2: Send to Azure OpenAI Whisper API
     try:
         import openai
-        openai_client = openai.AsyncOpenAI()
+
+        # Use Azure OpenAI Whisper (deployed as 'whisper' model)
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "https://aoai-kyogoku-service.openai.azure.com/")
+        azure_key = os.getenv("AZURE_OPENAI_KEY", "")
+
+        # Clean up endpoint URL - remove any path/query params, keep just base URL
+        from urllib.parse import urlparse
+        parsed = urlparse(azure_endpoint)
+        clean_endpoint = f"{parsed.scheme}://{parsed.netloc}/"
+
+        logger.info(f"[transcribe] Using Azure OpenAI endpoint: {clean_endpoint}")
+
+        openai_client = openai.AsyncAzureOpenAI(
+            api_key=azure_key,
+            api_version="2024-06-01",
+            azure_endpoint=clean_endpoint,
+        )
 
         file_size = os.path.getsize(video_path)
         max_size = 25 * 1024 * 1024  # 25MB Whisper API limit
+        logger.info(f"[transcribe] File size: {file_size} bytes (max: {max_size})")
 
-        if file_size <= max_size:
-            # Direct transcription
-            with open(video_path, "rb") as f:
+        async def _call_whisper(file_path: str) -> list:
+            """Call Azure OpenAI Whisper and return segments."""
+            with open(file_path, "rb") as f:
                 response = await openai_client.audio.transcriptions.create(
-                    model="whisper-1",
+                    model="whisper",
                     file=f,
                     response_format="verbose_json",
                     language="ja",
                     timestamp_granularities=["segment"],
                 )
 
-            segments = []
+            segs = []
             if hasattr(response, "segments") and response.segments:
                 for seg in response.segments:
-                    start = getattr(seg, "start", 0) if hasattr(seg, "start") else seg.get("start", 0)
-                    end = getattr(seg, "end", 0) if hasattr(seg, "end") else seg.get("end", 0)
-                    seg_text = getattr(seg, "text", "") if hasattr(seg, "text") else seg.get("text", "")
-                    segments.append({
-                        "start": float(start),
-                        "end": float(end),
-                        "text": seg_text.strip(),
-                    })
+                    s = getattr(seg, "start", 0) if hasattr(seg, "start") else seg.get("start", 0)
+                    e = getattr(seg, "end", 0) if hasattr(seg, "end") else seg.get("end", 0)
+                    t = getattr(seg, "text", "") if hasattr(seg, "text") else seg.get("text", "")
+                    segs.append({"start": float(s), "end": float(e), "text": t.strip()})
             elif hasattr(response, "text") and response.text:
-                # No segments returned, create a single segment
                 duration = req.time_end - req.time_start
-                segments.append({
-                    "start": 0.0,
-                    "end": duration,
-                    "text": response.text.strip(),
-                })
+                segs.append({"start": 0.0, "end": duration, "text": response.text.strip()})
+            return segs
+
+        if file_size <= max_size:
+            segments = await _call_whisper(video_path)
         else:
-            # File too large - extract audio first with ffmpeg if available
+            # File too large - try extracting audio with ffmpeg first
             audio_path = os.path.join(tmp_dir, "audio.wav")
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -730,60 +742,17 @@ async def transcribe_clip(
                 )
                 await proc.communicate()
                 if proc.returncode == 0 and os.path.exists(audio_path):
-                    with open(audio_path, "rb") as f:
-                        response = await openai_client.audio.transcriptions.create(
-                            model="whisper-1",
-                            file=f,
-                            response_format="verbose_json",
-                            language="ja",
-                            timestamp_granularities=["segment"],
-                        )
-                    segments = []
-                    if hasattr(response, "segments") and response.segments:
-                        for seg in response.segments:
-                            start = getattr(seg, "start", 0) if hasattr(seg, "start") else seg.get("start", 0)
-                            end = getattr(seg, "end", 0) if hasattr(seg, "end") else seg.get("end", 0)
-                            seg_text = getattr(seg, "text", "") if hasattr(seg, "text") else seg.get("text", "")
-                            segments.append({
-                                "start": float(start),
-                                "end": float(end),
-                                "text": seg_text.strip(),
-                            })
-                    elif hasattr(response, "text") and response.text:
-                        duration = req.time_end - req.time_start
-                        segments.append({
-                            "start": 0.0,
-                            "end": duration,
-                            "text": response.text.strip(),
-                        })
+                    segments = await _call_whisper(audio_path)
                 else:
                     raise RuntimeError("ffmpeg not available or failed")
             except Exception:
-                # ffmpeg not available - try sending mp4 directly (may fail for >25MB)
-                with open(video_path, "rb") as f:
-                    response = await openai_client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=f,
-                        response_format="verbose_json",
-                        language="ja",
-                        timestamp_granularities=["segment"],
-                    )
-                segments = []
-                if hasattr(response, "segments") and response.segments:
-                    for seg in response.segments:
-                        start = getattr(seg, "start", 0) if hasattr(seg, "start") else seg.get("start", 0)
-                        end = getattr(seg, "end", 0) if hasattr(seg, "end") else seg.get("end", 0)
-                        seg_text = getattr(seg, "text", "") if hasattr(seg, "text") else seg.get("text", "")
-                        segments.append({
-                            "start": float(start),
-                            "end": float(end),
-                            "text": seg_text.strip(),
-                        })
+                # ffmpeg not available - try sending mp4 directly
+                segments = await _call_whisper(video_path)
 
-        logger.info(f"[transcribe] Got {len(segments)} segments from Whisper")
+        logger.info(f"[transcribe] Got {len(segments)} segments from Azure OpenAI Whisper")
 
     except Exception as e:
-        logger.error(f"[transcribe] Whisper API failed: {e}")
+        logger.error(f"[transcribe] Whisper API failed: {e}", exc_info=True)
         _cleanup_tmp(tmp_dir)
         raise HTTPException(status_code=500, detail=f"Whisper transcription failed: {str(e)}")
 

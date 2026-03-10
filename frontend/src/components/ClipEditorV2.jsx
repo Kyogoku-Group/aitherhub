@@ -270,6 +270,44 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
     })();
   }, [clip, videoId, timelineData, buildCaptionsFromTranscripts, buildCaptionsFromAudioText]);
 
+  // ─── Auto-generate subtitles when clip editor opens ─────────────
+  // If no Whisper-sourced captions exist, auto-trigger transcription
+  const autoTranscribeTriggered = useRef(false);
+  useEffect(() => {
+    if (autoTranscribeTriggered.current) return;
+    if (!videoId || !clip) return;
+    if (transcribing) return;
+
+    // Wait for timelineData to load first
+    if (timelineData === null) return;
+
+    // Check if we already have Whisper-sourced captions
+    const hasWhisperCaptions = captions.some(
+      (c) => c.source === "whisper" || c.source === "transcript"
+    );
+    if (hasWhisperCaptions) {
+      console.log("[AutoTranscribe] Already have Whisper captions, skipping");
+      return;
+    }
+
+    // Check if clip.captions exist (from generate_clip)
+    if (clip?.captions && clip.captions.length > 0) {
+      console.log("[AutoTranscribe] clip.captions exist, skipping");
+      return;
+    }
+
+    // No Whisper captions found - auto-trigger transcription
+    const clipUrl = clip.clip_url || videoData?.video_url || clip.video_url;
+    if (!clipUrl) {
+      console.log("[AutoTranscribe] No clip URL available, skipping");
+      return;
+    }
+
+    console.log("[AutoTranscribe] No Whisper captions found, auto-triggering transcription");
+    autoTranscribeTriggered.current = true;
+    generateSubtitles();
+  }, [videoId, clip, timelineData, captions, transcribing, videoData]);
+
   // ─── Video Handlers ────────────────────────────────────────────
   const onTimeUpdate = useCallback(() => {
     if (videoRef.current) setCurrentTime(videoRef.current.currentTime);
