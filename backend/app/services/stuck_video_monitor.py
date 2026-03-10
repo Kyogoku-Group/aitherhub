@@ -86,12 +86,12 @@ async def _check_and_requeue_stuck_videos():
                             expires_in_minutes=1440,
                         )
 
-                        # Reset status and increment retry counter
+                        # Keep current STEP_* status for resume, only reset
+                        # step_progress and increment retry counter
                         await db.execute(
                             text("""
                                 UPDATE videos
-                                SET status = 'uploaded',
-                                    step_progress = 0,
+                                SET step_progress = 0,
                                     error_message = NULL,
                                     dequeue_count = COALESCE(dequeue_count, 0) + 1,
                                     updated_at = NOW()

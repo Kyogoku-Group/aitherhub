@@ -550,8 +550,9 @@ def main():
             logger.warning("[EXCEL] Failed to load Excel data: %s", e)
             excel_data = None
 
-        # Chỉ cho resume nếu >= STEP 7
-        if raw_start_step >= 7:
+        # Resume from the last completed step instead of restarting from 0.
+        # Previously only allowed resume from step >= 7, now allows any step.
+        if raw_start_step > 0:
             start_step = raw_start_step
 
             keyframes = None
@@ -562,11 +563,16 @@ def main():
 
             logger.info(f"[RESUME] resume from step {start_step} (status={current_status})")
 
-            fire_split_async(args, video_id, video_path, "db")
+            # Ensure artifact directory exists for resumed jobs
+            my_art_dir = video_root(video_id)
+            os.makedirs(my_art_dir, exist_ok=True)
+
+            if start_step >= 7:
+                fire_split_async(args, video_id, video_path, "db")
 
         else:
             start_step = 0
-            logger.info(f"[RESUME] force restart from STEP 0 (status={current_status})")
+            logger.info(f"[RESUME] starting from STEP 0 (status={current_status})")
 
             # Only remove THIS video's artifact folder (not the shared ART_ROOT)
             # to avoid deleting other videos' data during concurrent processing

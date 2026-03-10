@@ -4583,17 +4583,36 @@ async def retry_analysis(
             expires_in_minutes=1440,  # 24 hours
         )
 
-        # Reset status to 'uploaded' (pre-analysis state)
-        await db.execute(
-            text("""
-                UPDATE videos
-                SET status = 'uploaded',
-                    step_progress = 0,
-                    error_message = NULL
-                WHERE id = :vid
-            """),
-            {"vid": video_id},
-        )
+        # Determine resume status: keep current STEP_* status for resume,
+        # only reset to 'uploaded' if status is ERROR or non-STEP
+        previous_status = row.status
+        is_step_status = previous_status and previous_status.startswith("STEP_")
+
+        if is_step_status:
+            # Keep the STEP_* status so worker can resume from this step
+            resume_status = previous_status
+            await db.execute(
+                text("""
+                    UPDATE videos
+                    SET step_progress = 0,
+                        error_message = NULL
+                    WHERE id = :vid
+                """),
+                {"vid": video_id},
+            )
+        else:
+            # ERROR or other status: reset to uploaded for full re-analysis
+            resume_status = 'uploaded'
+            await db.execute(
+                text("""
+                    UPDATE videos
+                    SET status = 'uploaded',
+                        step_progress = 0,
+                        error_message = NULL
+                    WHERE id = :vid
+                """),
+                {"vid": video_id},
+            )
         await db.commit()
 
         # Enqueue analysis job
@@ -4606,14 +4625,14 @@ async def retry_analysis(
 
         logger.info(
             f"[retry-analysis] User {user_id} retried analysis for video {video_id} "
-            f"(was: {row.status})"
+            f"(was: {previous_status}, resume_from: {resume_status})"
         )
 
         return {
             "success": True,
             "video_id": video_id,
-            "message": "解析を再開しました。動画データはそのまま保持されています。",
-            "new_status": "uploaded",
+            "message": f"解析を再開しました。{resume_status}から再開します。",
+            "new_status": resume_status,
         }
 
     except HTTPException:

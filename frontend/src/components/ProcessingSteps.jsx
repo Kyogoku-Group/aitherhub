@@ -344,11 +344,12 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
     if (!videoId || isRetrying) return;
     setIsRetrying(true);
     try {
-      await VideoService.retryAnalysis(videoId);
-      // Reset state for fresh processing
+      const result = await VideoService.retryAnalysis(videoId);
+      // Use the resume status from API response instead of always resetting to STEP_COMPRESS
+      const resumeStatus = result?.new_status || 'STEP_COMPRESS_1080P';
       setIsStalled(false);
       setErrorMessage(null);
-      setCurrentStatus('STEP_COMPRESS_1080P');
+      setCurrentStatus(resumeStatus);
       setSmoothProgress(0);
       maxProgressRef.current = 0;
       setStepProgress(0);

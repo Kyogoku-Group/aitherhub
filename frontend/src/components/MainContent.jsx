@@ -1335,9 +1335,10 @@ export default function MainContent({
                           const btn = e.currentTarget;
                           btn.disabled = true;
                           btn.textContent = '再試行中...';
-                          await VideoService.retryAnalysis(videoData.id);
-                          // Reset to processing state
-                          setVideoData({ ...videoData, status: 'uploaded' });
+                          const result = await VideoService.retryAnalysis(videoData.id);
+                          // Use resume status from API response
+                          const resumeStatus = result?.new_status || 'uploaded';
+                          setVideoData({ ...videoData, status: resumeStatus });
                           toast({ title: '解析を再開しました', description: '動画データはそのまま保持されています。' });
                         } catch (err) {
                           console.error('Retry analysis failed:', err);
