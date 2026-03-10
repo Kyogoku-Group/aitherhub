@@ -435,6 +435,15 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
         }));
         setCaptions(newCaps);
         setStatus({ ok: true, msg: `${newCaps.length}件の字幕を生成しました` });
+        // Auto-save generated subtitles so they persist
+        if (clip?.clip_id) {
+          try {
+            await VideoService.updateClipCaptions(videoId, clip.clip_id, newCaps);
+            console.log("[Subtitles] Auto-saved generated subtitles");
+          } catch (saveErr) {
+            console.warn("[Subtitles] Auto-save failed:", saveErr);
+          }
+        }
       } else {
         setStatus({ ok: false, msg: "音声が検出されませんでした" });
       }

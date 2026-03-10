@@ -833,7 +833,22 @@ async def transcribe_clip(
             logger.warning(f"[transcribe] File still too large ({final_size/1024/1024:.1f} MB), Whisper may reject it")
 
         segments = await _call_whisper(whisper_file)
-        logger.info(f"[transcribe] Got {len(segments)} segments from Azure OpenAI Whisper")
+        logger.info(f"[transcribe] Got {len(segments)} raw segments from Azure OpenAI Whisper")
+
+        # Deduplicate segments: Whisper sometimes returns near-duplicate segments
+        # (same or very similar text within a short time window)
+        if len(segments) > 1:
+            deduped = [segments[0]]
+            for seg in segments[1:]:
+                prev = deduped[-1]
+                # Skip if same text and start time is within 15 seconds of previous
+                if seg["text"].strip() == prev["text"].strip() and abs(seg["start"] - prev["start"]) < 15:
+                    logger.info(f"[transcribe] Removing duplicate segment: '{seg['text'][:40]}' at {seg['start']:.1f}s (dup of {prev['start']:.1f}s)")
+                    continue
+                deduped.append(seg)
+            if len(deduped) < len(segments):
+                logger.info(f"[transcribe] Deduplicated: {len(segments)} -> {len(deduped)} segments")
+            segments = deduped
 
     except Exception as e:
         logger.error(f"[transcribe] Whisper API failed: {e}", exc_info=True)

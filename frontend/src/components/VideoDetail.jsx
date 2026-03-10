@@ -393,6 +393,30 @@ export default function VideoDetail({ videoData }) {
           ...prev,
           [phaseIndex]: { status: 'completed', clip_url: res.clip_url },
         }));
+        // Auto-trigger subtitle generation in background
+        try {
+          console.log(`[AutoTranscribe] Clip immediately completed for phase ${phaseIndex}, triggering transcription`);
+          VideoService.transcribeClip(videoData.id, {
+            clip_url: res.clip_url,
+            time_start: timeStart,
+            time_end: timeEnd,
+            phase_index: phaseIndex,
+          }).then(transcribeRes => {
+            if (transcribeRes?.segments?.length > 0) {
+              console.log(`[AutoTranscribe] Generated ${transcribeRes.segments.length} subtitles for phase ${phaseIndex}`);
+              const newCaps = transcribeRes.segments.map(s => ({
+                start: s.start, end: s.end, text: s.text, source: 'whisper',
+              }));
+              if (res.clip_id) {
+                VideoService.updateClipCaptions(videoData.id, res.clip_id, newCaps)
+                  .then(() => console.log(`[AutoTranscribe] Saved subtitles for phase ${phaseIndex}`))
+                  .catch(err => console.warn(`[AutoTranscribe] Save failed:`, err));
+              }
+            }
+          }).catch(err => console.warn(`[AutoTranscribe] Transcription failed:`, err));
+        } catch (transcribeErr) {
+          console.warn(`[AutoTranscribe] Error:`, transcribeErr);
+        }
         return;
       }
 
@@ -415,6 +439,31 @@ export default function VideoDetail({ videoData }) {
             }));
             clearInterval(clipPollingRef.current[phaseIndex]);
             delete clipPollingRef.current[phaseIndex];
+            // Auto-trigger subtitle generation in background
+            try {
+              console.log(`[AutoTranscribe] Clip completed for phase ${phaseIndex}, triggering transcription`);
+              VideoService.transcribeClip(videoData.id, {
+                clip_url: statusRes.clip_url,
+                time_start: timeStart,
+                time_end: timeEnd,
+                phase_index: phaseIndex,
+              }).then(transcribeRes => {
+                if (transcribeRes?.segments?.length > 0) {
+                  console.log(`[AutoTranscribe] Generated ${transcribeRes.segments.length} subtitles for phase ${phaseIndex}`);
+                  // Auto-save captions to clip
+                  const newCaps = transcribeRes.segments.map(s => ({
+                    start: s.start, end: s.end, text: s.text, source: 'whisper',
+                  }));
+                  if (statusRes.clip_id) {
+                    VideoService.updateClipCaptions(videoData.id, statusRes.clip_id, newCaps)
+                      .then(() => console.log(`[AutoTranscribe] Saved subtitles for phase ${phaseIndex}`))
+                      .catch(err => console.warn(`[AutoTranscribe] Save failed:`, err));
+                  }
+                }
+              }).catch(err => console.warn(`[AutoTranscribe] Transcription failed:`, err));
+            } catch (transcribeErr) {
+              console.warn(`[AutoTranscribe] Error:`, transcribeErr);
+            }
           } else if (statusRes.status === 'failed') {
             setClipStates(prev => ({
               ...prev,
