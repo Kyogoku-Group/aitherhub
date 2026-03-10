@@ -7,12 +7,17 @@ APIs for the new editor:
   ③ Segment Feedback:   POST /api/v1/editor/{video_id}/segment-feedback
   ④ List Feedback:      GET  /api/v1/editor/{video_id}/segment-feedback
   ⑤ Timeline Data:      GET  /api/v1/editor/{video_id}/timeline
+  ⑥ Transcribe Clip:    POST /api/v1/editor/{video_id}/transcribe
 """
 
 import uuid
 import json
+import os
 import logging
+import tempfile
+import asyncio
 from typing import Optional
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -51,6 +56,13 @@ class SegmentFeedbackResponse(BaseModel):
     feedback_type: str
     label: Optional[str]
     created_at: str
+
+
+class TranscribeRequest(BaseModel):
+    clip_url: str = Field(..., description="URL of the clip video to transcribe")
+    time_start: float = Field(..., description="Clip start time in seconds (absolute)")
+    time_end: float = Field(..., description="Clip end time in seconds (absolute)")
+    phase_index: Optional[int] = Field(None, description="Phase index of the clip")
 
 
 # ─── ① Segment Scores ─────────────────────────────────────────────────────
@@ -297,35 +309,24 @@ async def submit_segment_feedback(
     valid_labels = {
         "sales_moment", "comment_explosion", "strong_hook",
         "clear_explanation", "product_appeal", "too_long", "weak", "dropout",
-        None,
     }
-    if req.label not in valid_labels:
+    if req.label and req.label not in valid_labels:
         raise HTTPException(
             status_code=422,
-            detail=f"label must be one of: {sorted(l for l in valid_labels if l)}",
+            detail=f"label must be one of: {sorted(valid_labels)}",
         )
-
-    try:
-        uuid.UUID(video_id)
-    except ValueError:
-        raise HTTPException(status_code=422, detail="Invalid video_id UUID")
 
     feedback_id = str(uuid.uuid4())
 
     sql = text("""
-        INSERT INTO segment_feedback (
-            id, video_id, segment_id, start_sec, end_sec,
-            feedback_type, label, note, created_at
-        ) VALUES (
-            :id, :video_id, :segment_id, :start_sec, :end_sec,
-            :feedback_type, :label, :note, NOW()
-        )
-        RETURNING id, video_id, start_sec, end_sec,
-                  feedback_type, label, created_at
+        INSERT INTO segment_feedback
+            (id, video_id, segment_id, start_sec, end_sec, feedback_type, label, note)
+        VALUES
+            (:id, :video_id, :segment_id, :start_sec, :end_sec, :feedback_type, :label, :note)
     """)
 
     try:
-        result = await db.execute(sql, {
+        await db.execute(sql, {
             "id": feedback_id,
             "video_id": video_id,
             "segment_id": req.segment_id,
@@ -336,37 +337,42 @@ async def submit_segment_feedback(
             "note": req.note,
         })
         await db.commit()
-        row = result.fetchone()
     except Exception as e:
-        await db.rollback()
-        logger.error(f"[segment_feedback] DB error: {e}")
+        logger.error(f"[segment_feedback] Insert failed: {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail="Failed to save feedback")
 
     return SegmentFeedbackResponse(
-        id=str(row.id),
-        video_id=str(row.video_id),
-        start_sec=row.start_sec,
-        end_sec=row.end_sec,
-        feedback_type=row.feedback_type,
-        label=row.label,
-        created_at=row.created_at.isoformat() if row.created_at else "",
+        id=feedback_id,
+        video_id=video_id,
+        start_sec=req.start_sec,
+        end_sec=req.end_sec,
+        feedback_type=req.feedback_type,
+        label=req.label,
+        created_at=datetime.now(timezone.utc).isoformat(),
     )
 
+
+# ─── ④ List Feedback ─────────────────────────────────────────────────────
 
 @router.get("/{video_id}/segment-feedback")
 async def list_segment_feedback(
     video_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """List all segment feedback for a video."""
+    """
+    List all feedback for a video's segments.
+    """
     try:
         uuid.UUID(video_id)
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid video_id UUID")
 
     sql = text("""
-        SELECT id, video_id, segment_id, start_sec, end_sec,
-               feedback_type, label, note, created_at
+        SELECT id, start_sec, end_sec, feedback_type, label, note, created_at
         FROM segment_feedback
         WHERE video_id = :video_id
         ORDER BY start_sec ASC
@@ -376,27 +382,25 @@ async def list_segment_feedback(
         result = await db.execute(sql, {"video_id": video_id})
         rows = result.fetchall()
     except Exception as e:
-        logger.warning(f"[segment_feedback] Table may not exist yet: {e}")
+        logger.warning(f"[list_feedback] Table may not exist: {e}")
         return {"feedback": [], "count": 0}
 
     feedback = []
     for r in rows:
         feedback.append({
             "id": str(r.id),
-            "video_id": str(r.video_id),
-            "segment_id": str(r.segment_id) if r.segment_id else None,
             "start_sec": r.start_sec,
             "end_sec": r.end_sec,
             "feedback_type": r.feedback_type,
             "label": r.label,
             "note": r.note,
-            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "created_at": r.created_at.isoformat() if r.created_at else None,
         })
 
     return {"feedback": feedback, "count": len(feedback)}
 
 
-# ─── ⑤ Timeline Data (aggregated) ─────────────────────────────────────────
+# ─── ⑤ Timeline Data ─────────────────────────────────────────────────────
 
 @router.get("/{video_id}/timeline")
 async def get_timeline_data(
@@ -409,6 +413,7 @@ async def get_timeline_data(
     - Segment scores (or phase-level fallback)
     - AI markers (sales moments, hooks, etc.)
     - Existing feedback
+    - Transcripts (speech-to-text data)
     """
     try:
         uuid.UUID(video_id)
@@ -634,3 +639,273 @@ async def get_timeline_data(
         "transcript_source": transcript_source,
         "phase_count": len(phases),
     }
+
+
+# ─── ⑥ Transcribe Clip (On-demand Whisper) ──────────────────────────────
+
+@router.post("/{video_id}/transcribe")
+async def transcribe_clip(
+    video_id: str,
+    req: TranscribeRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    On-demand speech transcription for a clip.
+    Downloads the clip video, sends to OpenAI Whisper API,
+    saves results to video_transcripts table, and returns segments.
+    """
+    try:
+        uuid.UUID(video_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid video_id UUID")
+
+    logger.info(f"[transcribe] Starting transcription for video={video_id}, "
+                f"time={req.time_start}-{req.time_end}")
+
+    # Step 1: Download the clip video to a temp file
+    import httpx
+    tmp_dir = tempfile.mkdtemp(prefix="transcribe_")
+    video_path = os.path.join(tmp_dir, "clip.mp4")
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.get(req.clip_url)
+            resp.raise_for_status()
+            with open(video_path, "wb") as f:
+                f.write(resp.content)
+        logger.info(f"[transcribe] Downloaded clip: {os.path.getsize(video_path)} bytes")
+    except Exception as e:
+        logger.error(f"[transcribe] Failed to download clip: {e}")
+        _cleanup_tmp(tmp_dir)
+        raise HTTPException(status_code=400, detail=f"Failed to download clip video: {str(e)}")
+
+    # Step 2: Send to OpenAI Whisper API
+    try:
+        import openai
+        openai_client = openai.AsyncOpenAI()
+
+        file_size = os.path.getsize(video_path)
+        max_size = 25 * 1024 * 1024  # 25MB Whisper API limit
+
+        if file_size <= max_size:
+            # Direct transcription
+            with open(video_path, "rb") as f:
+                response = await openai_client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    response_format="verbose_json",
+                    language="ja",
+                    timestamp_granularities=["segment"],
+                )
+
+            segments = []
+            if hasattr(response, "segments") and response.segments:
+                for seg in response.segments:
+                    start = getattr(seg, "start", 0) if hasattr(seg, "start") else seg.get("start", 0)
+                    end = getattr(seg, "end", 0) if hasattr(seg, "end") else seg.get("end", 0)
+                    seg_text = getattr(seg, "text", "") if hasattr(seg, "text") else seg.get("text", "")
+                    segments.append({
+                        "start": float(start),
+                        "end": float(end),
+                        "text": seg_text.strip(),
+                    })
+            elif hasattr(response, "text") and response.text:
+                # No segments returned, create a single segment
+                duration = req.time_end - req.time_start
+                segments.append({
+                    "start": 0.0,
+                    "end": duration,
+                    "text": response.text.strip(),
+                })
+        else:
+            # File too large - extract audio first with ffmpeg if available
+            audio_path = os.path.join(tmp_dir, "audio.wav")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                    audio_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+                if proc.returncode == 0 and os.path.exists(audio_path):
+                    with open(audio_path, "rb") as f:
+                        response = await openai_client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=f,
+                            response_format="verbose_json",
+                            language="ja",
+                            timestamp_granularities=["segment"],
+                        )
+                    segments = []
+                    if hasattr(response, "segments") and response.segments:
+                        for seg in response.segments:
+                            start = getattr(seg, "start", 0) if hasattr(seg, "start") else seg.get("start", 0)
+                            end = getattr(seg, "end", 0) if hasattr(seg, "end") else seg.get("end", 0)
+                            seg_text = getattr(seg, "text", "") if hasattr(seg, "text") else seg.get("text", "")
+                            segments.append({
+                                "start": float(start),
+                                "end": float(end),
+                                "text": seg_text.strip(),
+                            })
+                    elif hasattr(response, "text") and response.text:
+                        duration = req.time_end - req.time_start
+                        segments.append({
+                            "start": 0.0,
+                            "end": duration,
+                            "text": response.text.strip(),
+                        })
+                else:
+                    raise RuntimeError("ffmpeg not available or failed")
+            except Exception:
+                # ffmpeg not available - try sending mp4 directly (may fail for >25MB)
+                with open(video_path, "rb") as f:
+                    response = await openai_client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=f,
+                        response_format="verbose_json",
+                        language="ja",
+                        timestamp_granularities=["segment"],
+                    )
+                segments = []
+                if hasattr(response, "segments") and response.segments:
+                    for seg in response.segments:
+                        start = getattr(seg, "start", 0) if hasattr(seg, "start") else seg.get("start", 0)
+                        end = getattr(seg, "end", 0) if hasattr(seg, "end") else seg.get("end", 0)
+                        seg_text = getattr(seg, "text", "") if hasattr(seg, "text") else seg.get("text", "")
+                        segments.append({
+                            "start": float(start),
+                            "end": float(end),
+                            "text": seg_text.strip(),
+                        })
+
+        logger.info(f"[transcribe] Got {len(segments)} segments from Whisper")
+
+    except Exception as e:
+        logger.error(f"[transcribe] Whisper API failed: {e}")
+        _cleanup_tmp(tmp_dir)
+        raise HTTPException(status_code=500, detail=f"Whisper transcription failed: {str(e)}")
+
+    # Step 3: Convert local times to absolute times and save to DB
+    # Whisper returns times relative to the clip (0-based)
+    # We need to store them as absolute times (offset by time_start)
+    absolute_segments = []
+    for i, seg in enumerate(segments):
+        abs_start = req.time_start + seg["start"]
+        abs_end = req.time_start + seg["end"]
+        absolute_segments.append({
+            "segment_index": i,
+            "start": abs_start,
+            "end": abs_end,
+            "local_start": seg["start"],
+            "local_end": seg["end"],
+            "text": seg["text"],
+        })
+
+    # Save to video_transcripts table
+    saved_count = 0
+    try:
+        # Check if video_transcripts table exists and has data for this range
+        # Delete existing transcripts for this time range first
+        del_sql = text("""
+            DELETE FROM video_transcripts
+            WHERE video_id = :video_id
+              AND start_time >= :time_start
+              AND end_time <= :time_end
+        """)
+        await db.execute(del_sql, {
+            "video_id": video_id,
+            "time_start": req.time_start - 1,
+            "time_end": req.time_end + 1,
+        })
+
+        # Insert new transcripts
+        for seg in absolute_segments:
+            ins_sql = text("""
+                INSERT INTO video_transcripts
+                    (id, video_id, segment_index, start_time, end_time, text, confidence)
+                VALUES
+                    (:id, :video_id, :segment_index, :start_time, :end_time, :text, :confidence)
+            """)
+            await db.execute(ins_sql, {
+                "id": str(uuid.uuid4()),
+                "video_id": video_id,
+                "segment_index": seg["segment_index"],
+                "start_time": seg["start"],
+                "end_time": seg["end"],
+                "text": seg["text"],
+                "confidence": 0.9,  # Whisper doesn't return per-segment confidence in this mode
+            })
+            saved_count += 1
+
+        await db.commit()
+        logger.info(f"[transcribe] Saved {saved_count} segments to video_transcripts")
+    except Exception as e:
+        logger.warning(f"[transcribe] Failed to save to video_transcripts: {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        # Still return the segments even if DB save fails
+
+    # Also update video_clips captions if clip_id exists
+    try:
+        # Build captions array for video_clips
+        captions_json = json.dumps([{
+            "start": seg["start"],
+            "end": seg["end"],
+            "text": seg["text"],
+        } for seg in absolute_segments], ensure_ascii=False)
+
+        # Find the clip in video_clips
+        clip_sql = text("""
+            SELECT id FROM video_clips
+            WHERE video_id = :video_id
+              AND time_start = :time_start
+              AND time_end = :time_end
+            LIMIT 1
+        """)
+        clip_result = await db.execute(clip_sql, {
+            "video_id": video_id,
+            "time_start": req.time_start,
+            "time_end": req.time_end,
+        })
+        clip_row = clip_result.fetchone()
+        if clip_row:
+            update_sql = text("""
+                UPDATE video_clips SET captions = :captions WHERE id = :id
+            """)
+            await db.execute(update_sql, {
+                "captions": captions_json,
+                "id": clip_row.id,
+            })
+            await db.commit()
+            logger.info(f"[transcribe] Updated video_clips captions for clip {clip_row.id}")
+    except Exception as e:
+        logger.warning(f"[transcribe] Failed to update video_clips captions: {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    # Cleanup
+    _cleanup_tmp(tmp_dir)
+
+    return {
+        "video_id": video_id,
+        "segments": absolute_segments,
+        "segment_count": len(absolute_segments),
+        "time_start": req.time_start,
+        "time_end": req.time_end,
+        "source": "whisper",
+    }
+
+
+def _cleanup_tmp(tmp_dir: str):
+    """Clean up temporary files."""
+    try:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception:
+        pass

@@ -1388,6 +1388,22 @@ class VideoService extends BaseApiService {
    * @param {string} videoId - The video ID to retry analysis for
    * @returns {Promise<{success: boolean, video_id: string, message: string, new_status: string}>}
    */
+  /**
+   * On-demand Whisper transcription for a clip.
+   * @param {string} videoId
+   * @param {Object} data - { clip_url, time_start, time_end, phase_index? }
+   * @returns {Promise<{segments, segment_count, source}>}
+   */
+  async transcribeClip(videoId, data) {
+    try {
+      const response = await this.post(`/api/v1/editor/${videoId}/transcribe`, data);
+      return response;
+    } catch (error) {
+      console.error('Failed to transcribe clip:', error);
+      throw error;
+    }
+  }
+
   async retryAnalysis(videoId) {
     try {
       const response = await this.post(`/api/v1/videos/${videoId}/retry-analysis`);

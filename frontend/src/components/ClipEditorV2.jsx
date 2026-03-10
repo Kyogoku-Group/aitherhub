@@ -90,6 +90,7 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
   const [status, setStatus] = useState(null);
   const [captions, setCaptions] = useState([]);
   const [savingCaps, setSavingCaps] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
 
   const clipDur = trimEnd - trimStart;
 
@@ -370,6 +371,39 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
       setStatus({ ok: false, msg: `字幕保存失敗: ${e.message}` });
     } finally {
       setSavingCaps(false);
+    }
+  };
+
+  // ─── On-demand Whisper Transcription ───────────────────────────
+  const generateSubtitles = async () => {
+    if (!videoId || !clip) return;
+    setTranscribing(true);
+    setStatus(null);
+    try {
+      const clipUrl = clip.clip_url || videoData?.video_url || clip.video_url;
+      if (!clipUrl) throw new Error("動画URLが見つかりません");
+      const res = await VideoService.transcribeClip(videoId, {
+        clip_url: clipUrl,
+        time_start: clip.time_start || origStart,
+        time_end: clip.time_end || origEnd,
+        phase_index: clip.phase_index,
+      });
+      if (res?.segments?.length > 0) {
+        const newCaps = res.segments.map((s) => ({
+          start: s.start,
+          end: s.end,
+          text: s.text,
+          source: "whisper",
+        }));
+        setCaptions(newCaps);
+        setStatus({ ok: true, msg: `${newCaps.length}件の字幕を生成しました` });
+      } else {
+        setStatus({ ok: false, msg: "音声が検出されませんでした" });
+      }
+    } catch (e) {
+      setStatus({ ok: false, msg: `字幕生成失敗: ${e.message}` });
+    } finally {
+      setTranscribing(false);
     }
   };
 
@@ -787,15 +821,53 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
                 </p>
                 {captions.length > 0 && captions[0]?.source && (
                   <p style={{ color: C.textDim, fontSize: 10, margin: "0 0 8px" }}>
-                    データソース: {captions[0].source === "transcript" ? "Whisper音声認識" : captions[0].source === "audio_text" ? "フェーズ音声テキスト" : "クリップ字幕"}
+                    データソース: {captions[0].source === "whisper" ? "Whisper音声認識（オンデマンド）" : captions[0].source === "transcript" ? "Whisper音声認識" : captions[0].source === "audio_text" ? "フェーズ音声テキスト" : "クリップ字幕"}
                   </p>
                 )}
-                {captions.length === 0 ? (
+                {/* Generate subtitles button - always visible */}
+                <button
+                  onClick={generateSubtitles}
+                  disabled={transcribing}
+                  style={{
+                    width: "100%",
+                    padding: "10px 16px",
+                    border: `1px solid ${C.accent}66`,
+                    borderRadius: 8,
+                    backgroundColor: transcribing ? C.surfaceLight : C.accent + "22",
+                    color: C.accent,
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: transcribing ? "not-allowed" : "pointer",
+                    marginBottom: 12,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 8,
+                    opacity: transcribing ? 0.7 : 1,
+                  }}
+                >
+                  {transcribing ? (
+                    <>
+                      <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span>
+                      AI音声認識で字幕を生成中...
+                    </>
+                  ) : captions.length > 0 ? (
+                    <>🎤 字幕を再生成（AI音声認識）</>
+                  ) : (
+                    <>🎤 字幕を生成（AI音声認識）</>
+                  )}
+                </button>
+                {transcribing && (
+                  <p style={{ color: C.textMuted, fontSize: 10, textAlign: "center", margin: "0 0 10px" }}>
+                    OpenAI Whisperで音声を書き起こしています。30秒〜1分程度かかります。
+                  </p>
+                )}
+                {captions.length === 0 && !transcribing ? (
                   <div
                     style={{
                       color: C.textDim,
                       textAlign: "center",
-                      padding: 32,
+                      padding: 24,
                       fontSize: 13,
                       backgroundColor: C.surfaceLight,
                       borderRadius: 8,
@@ -803,7 +875,7 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
                   >
                     音声書き起こしデータがありません。
                     <br />
-                    動画の分析が完了すると自動的に音声書き起こしが表示されます。
+                    上のボタンをクリックしてAI音声認識で字幕を生成してください。
                   </div>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
