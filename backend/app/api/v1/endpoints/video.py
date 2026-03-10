@@ -1070,7 +1070,7 @@ async def get_clip_status(
         user_id = user.get("user_id") or user.get("id")
 
         sql = text("""
-            SELECT id, status, clip_url, sas_token, sas_expireddate, error_message, created_at
+            SELECT id, status, clip_url, sas_token, sas_expireddate, error_message, created_at, captions
             FROM video_clips
             WHERE video_id = :video_id AND phase_index = CAST(:phase_index AS text)
             ORDER BY created_at DESC
@@ -1171,6 +1171,10 @@ async def get_clip_status(
         elif row.status == "dead":
             response["error_message"] = row.error_message or "Job moved to dead-letter queue after max retries"
 
+        # Include captions (subtitle data) if available
+        if hasattr(row, 'captions') and row.captions:
+            response["captions"] = row.captions
+
         return response
 
     except HTTPException:
@@ -1191,7 +1195,7 @@ async def list_clips(
         user_id = user.get("user_id") or user.get("id")
 
         sql = text("""
-            SELECT id, phase_index, time_start, time_end, status, clip_url, sas_token, sas_expireddate, created_at
+            SELECT id, phase_index, time_start, time_end, status, clip_url, sas_token, sas_expireddate, created_at, captions
             FROM video_clips
             WHERE video_id = :video_id
             ORDER BY phase_index ASC, created_at DESC
@@ -1275,6 +1279,9 @@ async def list_clips(
                         logger.warning(f"Failed to generate clip SAS in list: {e}")
 
                 clip["clip_url"] = clip_download_url or _replace_blob_url_to_cdn(row.clip_url)
+            # Include captions if available
+            if hasattr(row, 'captions') and row.captions:
+                clip["captions"] = row.captions
             clips.append(clip)
 
         return {"clips": clips}
@@ -3135,17 +3142,16 @@ async def update_clip_captions(
         if not clip_row:
             raise HTTPException(status_code=404, detail="Clip not found")
 
-        # Store captions as JSON in a new column (or metadata)
-        # For now, store in error_message field as JSON (we'll add a proper column later)
+        # Store captions as JSON in dedicated captions column
         import json as _json
         captions_json = _json.dumps(captions, ensure_ascii=False)
 
         update_sql = text("""
             UPDATE video_clips
-            SET error_message = :captions_json, updated_at = NOW()
+            SET captions = :captions_json::jsonb, updated_at = NOW()
             WHERE id = :clip_id
         """)
-        await db.execute(update_sql, {"captions_json": f"CAPTIONS:{captions_json}", "clip_id": clip_id})
+        await db.execute(update_sql, {"captions_json": captions_json, "clip_id": clip_id})
         await db.commit()
 
         logger.info(f"[CAPTIONS] Updated {len(captions)} captions for clip {clip_id}")

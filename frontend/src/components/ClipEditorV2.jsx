@@ -367,9 +367,9 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
         }}>
           {/* Large Video Preview */}
           <div style={{
-            position: "relative", width: "100%", maxWidth: 720,
-            aspectRatio: "16/9", backgroundColor: "#000", borderRadius: 12,
-            overflow: "hidden",
+            position: "relative", width: "100%", maxWidth: 400,
+            aspectRatio: "9/16", backgroundColor: "#000", borderRadius: 12,
+            overflow: "hidden", margin: "0 auto",
           }}>
             {(fullVideoUrl || clip.clip_url) ? (
               <video
@@ -379,7 +379,7 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
                 onLoadedMetadata={handleLoadedMetadata}
                 onPlay={() => setIsPlaying(true)}
                 onPause={() => setIsPlaying(false)}
-                style={{ width: "100%", height: "100%", objectFit: "contain" }}
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
               />
             ) : (
               <div style={{
@@ -431,7 +431,7 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
           {/* Playback Controls */}
           <div style={{
             display: "flex", alignItems: "center", gap: 16, marginTop: 12,
-            width: "100%", maxWidth: 720, justifyContent: "center",
+            width: "100%", maxWidth: 400, justifyContent: "center",
           }}>
             <button onClick={() => seekTo(Math.max(0, currentTime - 5))} style={controlBtnStyle}>
               -5s

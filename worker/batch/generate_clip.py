@@ -155,7 +155,7 @@ SUBTITLE_STYLES = [
 # DB helpers
 # =========================
 
-def update_clip_status(clip_id: str, status: str, clip_url: str = None, error_message: str = None):
+def update_clip_status(clip_id: str, status: str, clip_url: str = None, error_message: str = None, captions: list = None):
     """Update clip status in database."""
     loop = get_event_loop()
 
@@ -182,6 +182,18 @@ def update_clip_status(clip_id: str, status: str, clip_url: str = None, error_me
                     WHERE id = :clip_id
                 """)
                 await session.execute(sql, {"status": status, "clip_id": clip_id})
+            # Save captions (subtitle data) to DB
+            if captions is not None:
+                import json as _json
+                captions_sql = text("""
+                    UPDATE video_clips
+                    SET captions = :captions_json::jsonb, updated_at = NOW()
+                    WHERE id = :clip_id
+                """)
+                await session.execute(captions_sql, {
+                    "captions_json": _json.dumps(captions, ensure_ascii=False),
+                    "clip_id": clip_id,
+                })
 
     loop.run_until_complete(_update())
 
@@ -1699,9 +1711,21 @@ def generate_clip(clip_id: str, video_id: str, blob_url: str, time_start: float,
 
         logger.info(f"Clip uploaded: {uploaded_url}")
 
-        # 7. Update DB with completed status
-        update_clip_status(clip_id, "completed", clip_url=uploaded_url)
-        logger.info("=== Clip generation completed successfully ===")
+        # 7. Update DB with completed status + save captions
+        # Convert segments to captions format for frontend
+        captions_data = []
+        for seg in segments:
+            captions_data.append({
+                "start": round(seg.get("start", 0), 3),
+                "end": round(seg.get("end", 0), 3),
+                "text": seg.get("text", ""),
+                "words": [
+                    {"word": w.get("word", ""), "start": round(w.get("start", 0), 3), "end": round(w.get("end", 0), 3)}
+                    for w in seg.get("words", [])
+                ] if seg.get("words") else [],
+            })
+        update_clip_status(clip_id, "completed", clip_url=uploaded_url, captions=captions_data if captions_data else None)
+        logger.info(f"=== Clip generation completed successfully ({len(captions_data)} captions saved) ===")
 
     except Exception as e:
         logger.exception(f"Clip generation failed: {e}")
