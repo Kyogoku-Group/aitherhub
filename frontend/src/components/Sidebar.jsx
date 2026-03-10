@@ -595,6 +595,36 @@ export default function Sidebar({ isOpen, onClose, user, onVideoSelect, onNewAna
                                   <span className="text-[13px] font-medium text-gray-700 leading-snug truncate" title={video.original_filename}>
                                     {video.original_filename || `${window.__t('videoTitleFallback')} ${video.id}`}
                                   </span>
+                                  {/* Status badge for non-DONE videos */}
+                                  {video.status && video.status !== 'DONE' && (
+                                    <div className="flex items-center gap-1.5">
+                                      {video.status === 'ERROR' ? (
+                                        <span className="inline-flex items-center gap-1 text-[11px] text-red-500 font-medium leading-normal">
+                                          <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                                          エラー
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 text-[11px] text-amber-600 font-medium leading-normal">
+                                          <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 flex-shrink-0 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                                          {video.status === 'QUEUED' ? 'キュー待ち' : video.status === 'UPLOADED' ? 'アップロード済み' : video.status.startsWith('STEP_') ? '解析中' : video.status}
+                                        </span>
+                                      )}
+                                      {video.updated_at && (() => {
+                                        const updated = new Date(video.updated_at);
+                                        const now = new Date();
+                                        const diffMin = Math.floor((now - updated) / 60000);
+                                        if (diffMin < 1) return null;
+                                        const diffH = Math.floor(diffMin / 60);
+                                        const diffD = Math.floor(diffH / 24);
+                                        const elapsed = diffD > 0 ? `${diffD}日${diffH % 24}時間` : diffH > 0 ? `${diffH}時間${diffMin % 60}分` : `${diffMin}分`;
+                                        return (
+                                          <span className={`text-[10px] leading-normal ${diffMin > 30 ? 'text-red-400' : 'text-gray-400'}`}>
+                                            ({elapsed}経過)
+                                          </span>
+                                        );
+                                      })()}
+                                    </div>
+                                  )}
                                   {video.top_products && video.top_products.length > 0 && (
                                     <div className="flex items-center gap-1.5">
                                       <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 text-emerald-500 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
