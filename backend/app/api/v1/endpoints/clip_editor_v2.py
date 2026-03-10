@@ -566,10 +566,71 @@ async def get_timeline_data(
         except Exception:
             pass
 
+    # 5. Transcripts (actual speech-to-text data for subtitles)
+    transcripts = []
+    transcript_source = "none"
+    try:
+        # First try: video_transcripts table (fine-grained Whisper segments)
+        tr_sql = text("""
+            SELECT segment_index, start_time, end_time, text, confidence
+            FROM video_transcripts
+            WHERE video_id = :video_id
+            ORDER BY segment_index ASC
+        """)
+        tr_result = await db.execute(tr_sql, {"video_id": video_id})
+        tr_rows = tr_result.fetchall()
+        for r in tr_rows:
+            transcripts.append({
+                "start": r.start_time,
+                "end": r.end_time,
+                "text": r.text,
+                "confidence": r.confidence,
+            })
+        if transcripts:
+            transcript_source = "video_transcripts"
+    except Exception as e:
+        logger.warning(f"[timeline] video_transcripts query failed: {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    # Fallback: use audio_text from video_phases
+    if not transcripts:
+        try:
+            at_sql = text("""
+                SELECT phase_index, time_start, time_end, audio_text
+                FROM video_phases
+                WHERE video_id = :video_id
+                  AND audio_text IS NOT NULL
+                  AND audio_text != ''
+                ORDER BY phase_index ASC
+            """)
+            at_result = await db.execute(at_sql, {"video_id": video_id})
+            at_rows = at_result.fetchall()
+            for r in at_rows:
+                if r.audio_text and r.audio_text.strip():
+                    transcripts.append({
+                        "start": r.time_start,
+                        "end": r.time_end,
+                        "text": r.audio_text.strip(),
+                        "confidence": None,
+                    })
+            if transcripts:
+                transcript_source = "audio_text"
+        except Exception as e:
+            logger.warning(f"[timeline] audio_text fallback failed: {e}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
     return {
         "phases": phases,
         "markers": markers,
         "event_scores": event_scores,
         "feedback": feedback,
+        "transcripts": transcripts,
+        "transcript_source": transcript_source,
         "phase_count": len(phases),
     }

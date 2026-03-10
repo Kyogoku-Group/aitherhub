@@ -179,6 +179,7 @@ def generate_analysis_video(
     scale_width: int = 1280,
     crf: int = 28,
     preset: str = "veryfast",
+    timeout: int | None = None,
 ) -> str | None:
     """
     Generate a lightweight analysis-only video for fast frame extraction.
@@ -225,7 +226,7 @@ def generate_analysis_video(
 
     try:
         logger.info("[ANALYSIS_VIDEO] FFmpeg command: %s", " ".join(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0:
             logger.error("[ANALYSIS_VIDEO] FFmpeg failed: %s", result.stderr[-2000:] if result.stderr else "")
             if os.path.exists(output_path):
@@ -244,6 +245,11 @@ def generate_analysis_video(
             ratio,
         )
         return output_path
+    except subprocess.TimeoutExpired:
+        logger.warning("[ANALYSIS_VIDEO] Timed out after %s seconds", timeout)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return None
     except Exception as e:
         logger.error("[ANALYSIS_VIDEO] Unexpected error: %s", e)
         if os.path.exists(output_path):

@@ -581,29 +581,35 @@ def main():
         # =========================
         if start_step <= 0:
             blob_url_for_compress = args.blob_url if getattr(args, "blob_url", None) else None
-            update_video_status_sync(video_id, VideoStatus.STEP_COMPRESS_1080P)
             logger.info("=== FIRE BACKGROUND COMPRESSION (non-blocking) ===")
             fire_compress_async(video_path, blob_url_for_compress, video_id)
 
         # =========================
         # STEP 0-PRE: GENERATE ANALYSIS VIDEO (lightweight)
+        # Update status to STEP_0 immediately so frontend shows progress
         # =========================
         analysis_video_path = None
         if start_step <= 0:
+            update_video_status_sync(video_id, VideoStatus.STEP_0_EXTRACT_FRAMES)
             logger.info("=== STEP 0-PRE: GENERATE ANALYSIS VIDEO ===")
             _analysis_out = os.path.join(os.path.dirname(video_path), "analysis.mp4")
-            analysis_video_path = generate_analysis_video(
-                input_path=video_path,
-                output_path=_analysis_out,
-                fps=1,
-                scale_width=1280,
-                crf=28,
-                preset="veryfast",
-            )
+            try:
+                analysis_video_path = generate_analysis_video(
+                    input_path=video_path,
+                    output_path=_analysis_out,
+                    fps=1,
+                    scale_width=1280,
+                    crf=28,
+                    preset="veryfast",
+                    timeout=600,  # 10 minute timeout
+                )
+            except Exception as e:
+                logger.warning("[ANALYSIS_VIDEO] Failed with error: %s", e)
+                analysis_video_path = None
             if analysis_video_path:
                 logger.info("[ANALYSIS_VIDEO] Created: %s", analysis_video_path)
             else:
-                logger.warning("[ANALYSIS_VIDEO] Failed, falling back to RAW video for frames")
+                logger.warning("[ANALYSIS_VIDEO] Failed or timed out, falling back to RAW video for frames")
 
         # =========================
         # STEP 0 + STEP 3 – PARALLEL: EXTRACT FRAMES & AUDIO TRANSCRIPTION
@@ -616,7 +622,7 @@ def main():
         _frames_source = analysis_video_path if analysis_video_path else video_path
 
         if start_step <= 0:
-            update_video_status_sync(video_id, VideoStatus.STEP_0_EXTRACT_FRAMES)
+            # Status already updated to STEP_0 before analysis video generation
             logger.info("=== STEP 0+3 PARALLEL – EXTRACT FRAMES & AUDIO TRANSCRIPTION ===")
             logger.info("[FRAMES] Source: %s (analysis=%s)", _frames_source, bool(analysis_video_path))
 

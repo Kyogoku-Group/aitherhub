@@ -156,8 +156,30 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
     })();
   }, [videoId]);
 
-  // Helper: build subtitle-like captions from phase audio_text or description
-  const buildCaptionsFromPhases = useCallback((phases, clipData) => {
+  // Helper: build captions from real speech transcripts (Whisper segments)
+  const buildCaptionsFromTranscripts = useCallback((transcripts, clipData) => {
+    if (!transcripts?.length || !clipData) return [];
+    const tStart = clipData.time_start || 0;
+    const tEnd = clipData.time_end || 0;
+
+    // Filter transcripts that overlap with this clip's time range
+    return transcripts
+      .filter((t) => {
+        const s = t.start ?? 0;
+        const e = t.end ?? 0;
+        return s < tEnd && e > tStart;
+      })
+      .map((t) => ({
+        start: Math.max(t.start, tStart),
+        end: Math.min(t.end, tEnd),
+        text: t.text || "",
+        confidence: t.confidence,
+        source: "transcript",
+      }));
+  }, []);
+
+  // Fallback: build subtitle-like captions from phase audio_text (raw speech text per phase)
+  const buildCaptionsFromAudioText = useCallback((phases, clipData) => {
     if (!phases || !clipData) return [];
     const phaseIdx = clipData.phase_index;
     const tStart = clipData.time_start || 0;
@@ -170,7 +192,6 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
       return pStart < tEnd && pEnd > tStart;
     });
 
-    // If no matching phases, try exact phase_index match
     if (matchingPhases.length === 0) {
       const exact = phases.find((p) => p.phase_index === phaseIdx);
       if (exact) matchingPhases.push(exact);
@@ -178,16 +199,16 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
 
     const result = [];
     for (const phase of matchingPhases) {
-      const txt = phase.audio_text || phase.description;
+      // Use audio_text (actual speech) only, NOT description (AI summary)
+      const txt = phase.audio_text;
       if (!txt) continue;
-      // Clamp phase times to clip range
       const pStart = Math.max(phase.time_start ?? tStart, tStart);
       const pEnd = Math.min(phase.time_end ?? tEnd, tEnd);
 
-      // Split text into sentences
+      // Split text into sentences for better subtitle display
       const sentences = txt.split(/[。！？\n]/).map((s) => s.trim()).filter(Boolean);
       if (sentences.length === 0) {
-        result.push({ start: pStart, end: pEnd, text: txt.trim() });
+        result.push({ start: pStart, end: pEnd, text: txt.trim(), source: "audio_text" });
       } else {
         const dur = pEnd - pStart;
         const perSentence = dur / sentences.length;
@@ -196,6 +217,7 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
             start: Math.round((pStart + i * perSentence) * 100) / 100,
             end: Math.round((pStart + (i + 1) * perSentence) * 100) / 100,
             text: sent,
+            source: "audio_text",
           });
         });
       }
@@ -204,17 +226,31 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
   }, []);
 
   useEffect(() => {
+    // Priority 1: Real speech transcripts from timeline API (Whisper segments)
+    if (timelineData?.transcripts?.length > 0) {
+      const fromTranscripts = buildCaptionsFromTranscripts(timelineData.transcripts, clip);
+      if (fromTranscripts.length > 0) {
+        console.log(`[Subtitles] Using ${fromTranscripts.length} real transcript segments (source: ${timelineData.transcript_source})`);
+        setCaptions(fromTranscripts);
+        return;
+      }
+    }
+
+    // Priority 2: clip.captions (from generate_clip Whisper)
     if (clip?.captions && clip.captions.length > 0) {
+      console.log("[Subtitles] Using clip.captions");
       setCaptions(clip.captions);
       return;
     }
+
     if (!videoId || clip?.phase_index == null) return;
 
-    // Captions not included in clip object — fetch from API
+    // Priority 3: Fetch from clip status API
     (async () => {
       try {
         const res = await VideoService.getClipStatus(videoId, clip.phase_index);
         if (res?.captions && res.captions.length > 0) {
+          console.log("[Subtitles] Using getClipStatus captions");
           setCaptions(res.captions);
           return;
         }
@@ -222,13 +258,16 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
         console.warn("Failed to fetch clip captions:", e);
       }
 
-      // Fallback: generate captions from timeline phase audio_text
+      // Priority 4: Fallback to audio_text from phases (actual speech, NOT description)
       if (timelineData?.phases?.length > 0) {
-        const fallback = buildCaptionsFromPhases(timelineData.phases, clip);
-        if (fallback.length > 0) setCaptions(fallback);
+        const fallback = buildCaptionsFromAudioText(timelineData.phases, clip);
+        if (fallback.length > 0) {
+          console.log(`[Subtitles] Using ${fallback.length} audio_text fallback captions`);
+          setCaptions(fallback);
+        }
       }
     })();
-  }, [clip, videoId, timelineData, buildCaptionsFromPhases]);
+  }, [clip, videoId, timelineData, buildCaptionsFromTranscripts, buildCaptionsFromAudioText]);
 
   // ─── Video Handlers ────────────────────────────────────────────
   const onTimeUpdate = useCallback(() => {
@@ -744,8 +783,13 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
               <div>
                 <SectionTitle>字幕編集</SectionTitle>
                 <p style={{ color: C.textMuted, fontSize: 11, margin: "0 0 10px", lineHeight: 1.5 }}>
-                  テキストをクリックして編集できます。タイムスタンプをクリックするとその位置にジャンプします。
+                  配信者の音声書き起こしです。テキストを直接編集できます。タイムスタンプをクリックするとその位置にジャンプします。
                 </p>
+                {captions.length > 0 && captions[0]?.source && (
+                  <p style={{ color: C.textDim, fontSize: 10, margin: "0 0 8px" }}>
+                    データソース: {captions[0].source === "transcript" ? "Whisper音声認識" : captions[0].source === "audio_text" ? "フェーズ音声テキスト" : "クリップ字幕"}
+                  </p>
+                )}
                 {captions.length === 0 ? (
                   <div
                     style={{
@@ -757,9 +801,9 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
                       borderRadius: 8,
                     }}
                   >
-                    字幕データがありません。
+                    音声書き起こしデータがありません。
                     <br />
-                    クリップを再生成すると自動字幕が追加されます。
+                    動画の分析が完了すると自動的に音声書き起こしが表示されます。
                   </div>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
