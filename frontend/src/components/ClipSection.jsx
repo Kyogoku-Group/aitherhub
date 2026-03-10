@@ -184,11 +184,12 @@ export default function ClipSection({ videoData, clipStates, reports1 }) {
       {/* ClipEditorV2 Modal */}
       {editorClip && (
         <ClipEditorV2
+          videoId={videoData?.id}
           videoData={videoData}
           clip={editorClip}
           phases={reports1}
           onClose={() => setEditorClip(null)}
-          onSave={(updatedClip) => {
+          onClipUpdated={(res) => {
             setEditorClip(null);
           }}
         />

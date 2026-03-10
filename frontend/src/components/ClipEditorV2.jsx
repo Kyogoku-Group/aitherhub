@@ -135,8 +135,22 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
   }, [videoId]);
 
   useEffect(() => {
-    if (clip?.captions) setCaptions(clip.captions);
-  }, [clip]);
+    if (clip?.captions && clip.captions.length > 0) {
+      setCaptions(clip.captions);
+    } else if (videoId && clip?.phase_index != null) {
+      // Captions not included in clip object — fetch from API
+      (async () => {
+        try {
+          const res = await VideoService.getClipStatus(videoId, clip.phase_index);
+          if (res?.captions && res.captions.length > 0) {
+            setCaptions(res.captions);
+          }
+        } catch (e) {
+          console.warn("Failed to fetch clip captions:", e);
+        }
+      })();
+    }
+  }, [clip, videoId]);
 
   // ─── Video Handlers ────────────────────────────────────────────
   const onTimeUpdate = useCallback(() => {

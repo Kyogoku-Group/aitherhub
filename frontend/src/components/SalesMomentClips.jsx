@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import VideoService from "../base/services/videoService";
 import { useSectionState } from "../base/hooks/useSectionState";
 import { ErrorState } from "./SectionStateUI";
+import ClipEditorV2 from "./ClipEditorV2";
 
 /**
  * SalesMomentClips
@@ -17,6 +18,7 @@ import { ErrorState } from "./SectionStateUI";
 export default function SalesMomentClips({ videoData, onRequestClip, clipStates = {} }) {
   const { state, data, error, execute, retry } = useSectionState("SalesMomentClips");
   const [collapsed, setCollapsed] = useState(false);
+  const [editorClip, setEditorClip] = useState(null);
 
   const formatTime = (seconds) => {
     if (seconds == null || isNaN(seconds)) return "--:--";
@@ -49,13 +51,26 @@ export default function SalesMomentClips({ videoData, onRequestClip, clipStates 
     }
   };
 
+  const handleOpenEditor = (candidate) => {
+    const clipState = getClipState(candidate);
+    if (!clipState) return;
+    setEditorClip({
+      clip_url: clipState.clip_url,
+      clip_id: clipState.clip_id || clipState.id,
+      phase_index: candidate.phase_index,
+      time_start: candidate.time_start,
+      time_end: candidate.time_end,
+      label: candidate.label,
+    });
+  };
+
   const metricIcon = (metric) => {
     switch (metric) {
-      case "gmv": return "💰";
-      case "orders": return "🛒";
-      case "clicks": return "👆";
-      case "viewers": return "👁️";
-      default: return "📊";
+      case "gmv": return "\u{1F4B0}";
+      case "orders": return "\u{1F6D2}";
+      case "clicks": return "\u{1F446}";
+      case "viewers": return "\u{1F441}\uFE0F";
+      default: return "\u{1F4CA}";
     }
   };
 
@@ -160,7 +175,7 @@ export default function SalesMomentClips({ videoData, onRequestClip, clipStates 
         {state === "empty" && !collapsed && (
           <div className="px-5 pb-5">
             <div className="text-center py-8 text-gray-400 text-sm">
-              <div className="text-3xl mb-2">📊</div>
+              <div className="text-3xl mb-2">{"\u{1F4CA}"}</div>
               <div>スパイクが検出されませんでした。</div>
               <div className="mt-1 text-xs">売上データが均一な場合、スパイクは検出されません。</div>
             </div>
@@ -175,7 +190,7 @@ export default function SalesMomentClips({ videoData, onRequestClip, clipStates 
               <span className="text-orange-600 font-semibold">
                 {data.spike_count} スパイク検出
               </span>
-              <span className="text-gray-400">→</span>
+              <span className="text-gray-400">{"\u2192"}</span>
               <span className="text-gray-600">
                 {data.candidates?.length} クリップ候補
               </span>
@@ -196,7 +211,7 @@ export default function SalesMomentClips({ videoData, onRequestClip, clipStates 
                         <span className="text-white text-lg">{metricIcon(candidate.primary_metric)}</span>
                         <span className="text-white font-bold text-sm">{candidate.label}</span>
                         <span className="text-white/80 text-xs">
-                          {formatTime(candidate.time_start)} – {formatTime(candidate.time_end)}
+                          {formatTime(candidate.time_start)} {"\u2013"} {formatTime(candidate.time_end)}
                         </span>
                       </div>
                       <span className="bg-white/20 text-white text-xs font-bold px-2 py-0.5 rounded-full">
@@ -229,14 +244,29 @@ export default function SalesMomentClips({ videoData, onRequestClip, clipStates 
                       {/* アクションボタン */}
                       <div className="flex items-center justify-end gap-2">
                         {clipState?.status === "completed" && clipState?.clip_url ? (
-                          <a
-                            href={clipState.clip_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-500 text-white text-xs font-medium hover:bg-green-600 transition-colors"
-                          >
-                            ダウンロード
-                          </a>
+                          <>
+                            {/* 編集ボタン */}
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditor(candidate)}
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border-2 border-orange-400 text-orange-600 text-xs font-medium hover:bg-orange-50 transition-colors"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                              </svg>
+                              編集
+                            </button>
+                            {/* ダウンロードボタン */}
+                            <a
+                              href={clipState.clip_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-500 text-white text-xs font-medium hover:bg-green-600 transition-colors"
+                            >
+                              ダウンロード
+                            </a>
+                          </>
                         ) : clipState?.status === "requesting" || clipState?.status === "pending" || clipState?.status === "processing" ? (
                           <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-100 text-gray-500 text-xs font-medium cursor-not-allowed">
                             <svg className="animate-spin" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -265,6 +295,21 @@ export default function SalesMomentClips({ videoData, onRequestClip, clipStates 
           </div>
         )}
       </div>
+
+      {/* ClipEditorV2 Modal */}
+      {editorClip && (
+        <ClipEditorV2
+          videoId={videoData?.id}
+          clip={editorClip}
+          videoData={videoData}
+          onClose={() => setEditorClip(null)}
+          onClipUpdated={(res) => {
+            if (res?.clip_id) {
+              setEditorClip(null);
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
