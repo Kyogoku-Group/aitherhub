@@ -4563,9 +4563,11 @@ async def retry_analysis(
         if str(row.user_id) != str(user_id):
             raise HTTPException(status_code=403, detail="Forbidden")
 
-        # Only allow retry for ERROR or stuck states
-        allowed_statuses = ("ERROR", "error", "uploaded", "UPLOADED")
-        if row.status not in allowed_statuses:
+        # Allow retry for ERROR, stuck QUEUED, or stalled processing states
+        allowed_statuses = ("ERROR", "error", "uploaded", "UPLOADED", "QUEUED")
+        # Also allow any STEP_* status (e.g. STEP_0_EXTRACT_FRAMES) that may be stalled
+        is_stuck_step = row.status and row.status.startswith("STEP_")
+        if row.status not in allowed_statuses and not is_stuck_step:
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot retry: video status is '{row.status}'. "
