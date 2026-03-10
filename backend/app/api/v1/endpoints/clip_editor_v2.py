@@ -416,45 +416,18 @@ async def get_timeline_data(
         raise HTTPException(status_code=422, detail="Invalid video_id UUID")
 
     # 1. Phases
-    # Check if audio_text column exists in video_phases table
-    has_audio_text = False
-    try:
-        col_check = text("""
-            SELECT column_name FROM information_schema.columns
-            WHERE table_name = 'video_phases' AND column_name = 'audio_text'
-            LIMIT 1
-        """)
-        col_result = await db.execute(col_check)
-        has_audio_text = col_result.fetchone() is not None
-    except Exception:
-        has_audio_text = False
-
-    if has_audio_text:
-        phases_sql = text("""
-            SELECT vp.phase_index, vp.time_start, vp.time_end,
-                   vp.phase_description, vp.audio_text,
-                   pi.hook_score, pi.viral_score,
-                   pi.engagement_score, pi.speech_energy,
-                   pi.key_actions
-            FROM video_phases vp
-            LEFT JOIN phase_insights pi
-                ON pi.video_id = vp.video_id AND pi.phase_index = vp.phase_index
-            WHERE vp.video_id = :video_id
-            ORDER BY vp.phase_index ASC
-        """)
-    else:
-        phases_sql = text("""
-            SELECT vp.phase_index, vp.time_start, vp.time_end,
-                   vp.phase_description,
-                   pi.hook_score, pi.viral_score,
-                   pi.engagement_score, pi.speech_energy,
-                   pi.key_actions
-            FROM video_phases vp
-            LEFT JOIN phase_insights pi
-                ON pi.video_id = vp.video_id AND pi.phase_index = vp.phase_index
-            WHERE vp.video_id = :video_id
-            ORDER BY vp.phase_index ASC
-        """)
+    phases_sql = text("""
+        SELECT vp.phase_index, vp.time_start, vp.time_end,
+               vp.phase_description,
+               pi.hook_score, pi.viral_score,
+               pi.engagement_score, pi.speech_energy,
+               pi.key_actions
+        FROM video_phases vp
+        LEFT JOIN phase_insights pi
+            ON pi.video_id = vp.video_id AND pi.phase_index = vp.phase_index
+        WHERE vp.video_id = :video_id
+        ORDER BY vp.phase_index ASC
+    """)
     phases_result = await db.execute(phases_sql, {"video_id": video_id})
     phases_rows = phases_result.fetchall()
 
@@ -467,7 +440,7 @@ async def get_timeline_data(
             except Exception:
                 key_actions = None
 
-        phase_data = {
+        phases.append({
             "phase_index": r.phase_index,
             "time_start": r.time_start,
             "time_end": r.time_end,
@@ -477,11 +450,7 @@ async def get_timeline_data(
             "engagement_score": r.engagement_score,
             "speech_energy": r.speech_energy,
             "key_actions": key_actions,
-        }
-        # Include audio_text for subtitle fallback
-        if has_audio_text and hasattr(r, 'audio_text') and r.audio_text:
-            phase_data["audio_text"] = r.audio_text
-        phases.append(phase_data)
+        })
 
     # 2. Sales moments (AI markers)
     markers = []
