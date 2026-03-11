@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import update
+from sqlalchemy import update, text
 
 from app.models.orm.live_analysis_job import LiveAnalysisJob
 
@@ -86,47 +86,47 @@ class LiveAnalysisPipeline:
 
         try:
             # Step 1: Assemble chunks
-            await self._update_step(job_uuid, "assembling", 0.0)
+            await self._update_step(job_uuid, "assembling", 0.0, video_id=video_id)
             assembled_path = await self._assemble_chunks(
                 video_id=video_id,
                 email=email,
                 total_chunks=total_chunks,
             )
-            await self._update_step(job_uuid, "assembling", 0.10)
+            await self._update_step(job_uuid, "assembling", 0.10, video_id=video_id)
 
             # Step 2: Extract audio
-            await self._update_step(job_uuid, "audio_extraction", 0.10)
+            await self._update_step(job_uuid, "audio_extraction", 0.10, video_id=video_id)
             audio_path = await self._extract_audio(assembled_path)
-            await self._update_step(job_uuid, "audio_extraction", 0.20)
+            await self._update_step(job_uuid, "audio_extraction", 0.20, video_id=video_id)
 
             # Step 3: Speech to Text
-            await self._update_step(job_uuid, "speech_to_text", 0.20)
+            await self._update_step(job_uuid, "speech_to_text", 0.20, video_id=video_id)
             transcript = await self._speech_to_text(audio_path)
-            await self._update_step(job_uuid, "speech_to_text", 0.45)
+            await self._update_step(job_uuid, "speech_to_text", 0.45, video_id=video_id)
 
             # Step 4: OCR Processing
-            await self._update_step(job_uuid, "ocr_processing", 0.45)
+            await self._update_step(job_uuid, "ocr_processing", 0.45, video_id=video_id)
             ocr_results = await self._ocr_processing(assembled_path)
-            await self._update_step(job_uuid, "ocr_processing", 0.70)
+            await self._update_step(job_uuid, "ocr_processing", 0.70, video_id=video_id)
 
             # Step 5: Sales Moment Detection
-            await self._update_step(job_uuid, "sales_detection", 0.70)
+            await self._update_step(job_uuid, "sales_detection", 0.70, video_id=video_id)
             sales_moments = await self._detect_sales_moments(
                 transcript=transcript,
                 ocr_results=ocr_results,
                 stream_source=stream_source,
             )
-            await self._update_step(job_uuid, "sales_detection", 0.85)
+            await self._update_step(job_uuid, "sales_detection", 0.85, video_id=video_id)
 
             # Step 6: Clip Generation
-            await self._update_step(job_uuid, "clip_generation", 0.85)
+            await self._update_step(job_uuid, "clip_generation", 0.85, video_id=video_id)
             clips = await self._generate_clips(
                 assembled_path=assembled_path,
                 sales_moments=sales_moments,
                 video_id=video_id,
                 email=email,
             )
-            await self._update_step(job_uuid, "clip_generation", 1.0)
+            await self._update_step(job_uuid, "clip_generation", 1.0, video_id=video_id)
 
             # Build final results
             results = {
@@ -149,6 +149,24 @@ class LiveAnalysisPipeline:
                     results=results,
                 )
             )
+
+            # BUILD 28: Mark videos table as DONE
+            try:
+                duration = results.get("total_duration_seconds")
+                await self.db.execute(
+                    text("""
+                        UPDATE videos
+                        SET status = 'DONE',
+                            step_progress = 100,
+                            duration = :duration,
+                            updated_at = now()
+                        WHERE id = :video_id
+                    """),
+                    {"video_id": video_id, "duration": duration},
+                )
+            except Exception as e:
+                logger.debug(f"[pipeline] Non-critical: video DONE sync failed: {e}")
+
             await self.db.commit()
 
             logger.info(
@@ -172,6 +190,18 @@ class LiveAnalysisPipeline:
                         error_message=str(exc)[:2000],
                     )
                 )
+                # BUILD 28: Mark videos table as ERROR
+                try:
+                    await self.db.execute(
+                        text("""
+                            UPDATE videos
+                            SET status = 'ERROR', updated_at = now()
+                            WHERE id = :video_id
+                        """),
+                        {"video_id": video_id},
+                    )
+                except Exception:
+                    pass
                 await self.db.commit()
             except Exception as _e:
                 logger.debug(f"Suppressed: {_e}")
@@ -181,11 +211,56 @@ class LiveAnalysisPipeline:
     # Step update helper
     # ──────────────────────────────────────────
 
+    # BUILD 28: Map LiveBoost pipeline steps to AitherHub video status values
+    # so that the videos table status stays compatible with the existing
+    # progress/status display system.
+    _STEP_TO_VIDEO_STATUS = {
+        "assembling":       "STEP_COMPRESS_1080P",
+        "audio_extraction": "STEP_0_EXTRACT_FRAMES",
+        "speech_to_text":   "STEP_3_TRANSCRIBE_AUDIO",
+        "ocr_processing":   "STEP_4_IMAGE_CAPTION",
+        "sales_detection":  "STEP_5_BUILD_PHASE_UNITS",
+        "clip_generation":  "STEP_13_BUILD_REPORTS",
+    }
+
+    async def _sync_video_status(
+        self,
+        video_id: str,
+        step_name: str,
+        progress: float,
+    ) -> None:
+        """BUILD 28: Sync the videos table status with pipeline progress.
+
+        Maps LiveBoost pipeline steps to existing AitherHub STEP_* status
+        values so the History UI shows correct progress indicators.
+        """
+        video_status = self._STEP_TO_VIDEO_STATUS.get(step_name, "processing")
+        # Convert 0.0-1.0 progress to 0-100 step_progress
+        step_progress = min(int(progress * 100), 100)
+        try:
+            await self.db.execute(
+                text("""
+                    UPDATE videos
+                    SET status = :status,
+                        step_progress = :step_progress,
+                        updated_at = now()
+                    WHERE id = :video_id
+                """),
+                {
+                    "video_id": video_id,
+                    "status": video_status,
+                    "step_progress": step_progress,
+                },
+            )
+        except Exception as e:
+            logger.debug(f"[pipeline] Non-critical: video status sync failed: {e}")
+
     async def _update_step(
         self,
         job_id: uuid.UUID,
         step_name: str,
         progress: float,
+        video_id: str | None = None,
     ) -> None:
         """Update the job's current step and progress in the database."""
         step_info = next(
@@ -203,6 +278,11 @@ class LiveAnalysisPipeline:
                 progress=round(progress, 3),
             )
         )
+
+        # BUILD 28: Also sync to videos table
+        if video_id:
+            await self._sync_video_status(video_id, step_name, progress)
+
         await self.db.commit()
         logger.info(f"[pipeline] step={step_name} progress={progress:.1%}")
 

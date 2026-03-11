@@ -21,12 +21,13 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, text
 from loguru import logger
 
 from app.core.db import get_db
 from app.core.dependencies import get_current_user
 from app.models.orm.live_analysis_job import LiveAnalysisJob
+from app.models.orm.video import Video
 from app.schemas.live_analysis_schema import (
     LiveAnalysisStartRequest,
     LiveAnalysisStartResponse,
@@ -69,6 +70,62 @@ async def migrate_tables():
 
 
 # ──────────────────────────────────────────────
+# Helper: Ensure videos table record exists
+# ──────────────────────────────────────────────
+async def _ensure_video_record(
+    db: AsyncSession,
+    video_id: str,
+    user_id: int,
+    status_value: str = "pending",
+) -> None:
+    """
+    BUILD 28: Ensure a corresponding record exists in the `videos` table
+    so that LiveBoost sessions appear in AitherHub's History view.
+
+    The History API (`/videos/user/{id}/with-clips`) queries the `videos`
+    table, so LiveBoost sessions must have a record there to be visible.
+
+    Uses INSERT ... ON DUPLICATE KEY UPDATE to be idempotent.
+    """
+    try:
+        # Check if record already exists
+        result = await db.execute(
+            select(Video).where(Video.id == uuid_module.UUID(video_id))
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            # Update status if it's being retried (failed → pending)
+            if existing.status == "ERROR" and status_value == "pending":
+                existing.status = "uploaded"
+                existing.step_progress = 0
+                await db.flush()
+                logger.info(
+                    f"[live-analysis] Reset videos record for retry: "
+                    f"video={video_id} status=uploaded"
+                )
+        else:
+            # Create new record
+            video = Video(
+                id=uuid_module.UUID(video_id),
+                user_id=user_id,
+                original_filename=f"LiveBoost_{datetime.now(timezone.utc).strftime('%m%d_%H%M')}",
+                status=status_value,
+                upload_type="live_boost",
+                step_progress=0,
+            )
+            db.add(video)
+            await db.flush()
+            logger.info(
+                f"[live-analysis] Created videos record: "
+                f"video={video_id} user={user_id} upload_type=live_boost"
+            )
+    except Exception as e:
+        logger.warning(f"[live-analysis] Failed to ensure video record: {e}")
+        # Non-critical — don't block the analysis pipeline
+
+
+# ──────────────────────────────────────────────
 # 1. Start Analysis
 # ──────────────────────────────────────────────
 @router.post("/start", response_model=LiveAnalysisStartResponse)
@@ -82,8 +139,9 @@ async def start_live_analysis(
 
     This endpoint:
       1. Creates a LiveAnalysisJob record (status=pending)
-      2. Enqueues a worker job for the analysis pipeline
-      3. Returns the job ID for status polling
+      2. Creates/updates a Video record in the videos table (for History view)
+      3. Enqueues a worker job for the analysis pipeline
+      4. Returns the job ID for status polling
 
     Called by the LiveBoost iOS app after ChunkUploadService
     confirms all chunks are uploaded.
@@ -121,6 +179,10 @@ async def start_live_analysis(
                 await db.commit()
                 await db.refresh(existing_job)
                 job = existing_job
+
+                # BUILD 28: Also reset the videos table record for retry
+                await _ensure_video_record(db, video_id, user_id, "pending")
+                await db.commit()
         else:
             # Create new job
             job = LiveAnalysisJob(
@@ -133,6 +195,10 @@ async def start_live_analysis(
                 progress=0,
             )
             db.add(job)
+
+            # BUILD 28: Also create a record in the videos table
+            await _ensure_video_record(db, video_id, user_id, "uploaded")
+
             await db.commit()
             await db.refresh(job)
 
@@ -174,6 +240,18 @@ async def start_live_analysis(
                         error_message=f"Failed to enqueue: {enqueue_result.error}",
                     )
                 )
+                # BUILD 28: Also update videos table on enqueue failure
+                try:
+                    await db.execute(
+                        text("""
+                            UPDATE videos
+                            SET status = 'ERROR', updated_at = now()
+                            WHERE id = :video_id
+                        """),
+                        {"video_id": video_id},
+                    )
+                except Exception:
+                    pass
                 logger.error(
                     f"[live-analysis] Enqueue FAILED job={job.id} error={enqueue_result.error}"
                 )
