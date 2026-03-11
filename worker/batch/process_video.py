@@ -1074,8 +1074,17 @@ def main():
             # time_offset_seconds: この動画がCSVタイムライン内のどこから始まるか
             csv_first_sec = timed_entries[0]["time_sec"] if timed_entries else 0
             video_start_sec = csv_first_sec + time_offset_seconds
-            logger.info("[CSV_METRICS] csv_first=%s, time_offset=%s, video_start=%s",
-                        csv_first_sec, time_offset_seconds, video_start_sec)
+            csv_last_sec = timed_entries[-1]["time_sec"] if timed_entries else 0
+            logger.info(
+                "[CSV_METRICS] timed_entries=%d, csv_first=%.1f, csv_last=%.1f, "
+                "time_offset=%.1f, video_start=%.1f",
+                len(timed_entries), csv_first_sec, csv_last_sec,
+                time_offset_seconds, video_start_sec,
+            )
+            # Log sample time values for debugging
+            if timed_entries:
+                sample_times = [te["time_sec"] for te in timed_entries[:5]]
+                logger.info("[CSV_METRICS] First 5 CSV time_sec values: %s", sample_times)
 
             # スコア付きスロットをtime_secでインデックス化
             score_map = {s["time_sec"]: s["score"] for s in scored_slots}
@@ -1095,7 +1104,7 @@ def main():
                 phase_abs_end   = csv_first_sec + time_offset_seconds + end_sec
                 sales_info = match_sales_to_phase(trends, phase_abs_start, phase_abs_end)
                 p["sales_data"] = sales_info
-                logger.debug(
+                logger.info(
                     "[CSV_METRICS] Phase %s: start_sec=%.1f end_sec=%.1f "
                     "phase_abs_start=%.1f phase_abs_end=%.1f (csv_first=%.1f offset=%.1f)",
                     p.get("phase_index", "?"), start_sec, end_sec,
@@ -1137,6 +1146,11 @@ def main():
                             gv = _safe_float(e.get(gpm_key)) or 0
                             phase_gpm = max(phase_gpm, gv)
                         phase_score = max(phase_score, score_map.get(t, 0))
+
+                logger.info(
+                    "[CSV_METRICS] Phase %s: match_count=%d gmv=%.1f orders=%d viewers=%d",
+                    p.get("phase_index", "?"), match_count, phase_gmv, phase_orders, phase_viewers,
+                )
 
                 # sales_dataから商品名を取得
                 phase_product_names = sales_info.get("products_sold", []) if sales_info else []
