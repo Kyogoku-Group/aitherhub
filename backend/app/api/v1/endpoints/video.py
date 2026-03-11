@@ -846,7 +846,9 @@ async def get_video_product_data(
         # Parse product Excel
         if product_blob_url:
             try:
+                logger.info("[PRODUCT-DATA] Parsing product Excel: %s", product_blob_url[:100])
                 products = await _parse_excel(product_blob_url)
+                logger.info("[PRODUCT-DATA] Product parse result: %d items", len(products))
                 response_data["products"] = products
                 response_data["has_product_data"] = len(products) > 0
 
@@ -887,23 +889,34 @@ async def get_video_product_data(
                     except Exception as cache_err:
                         logger.warning(f"Failed to cache top_products: {cache_err}")
             except Exception as e:
-                logger.warning(f"Failed to parse product Excel: {e}")
+                logger.warning(f"Failed to parse product Excel: {e}", exc_info=True)
+
+        else:
+            logger.info("[PRODUCT-DATA] No product_blob_url")
 
         # Parse trend Excel
         if trend_blob_url:
             try:
+                logger.info("[PRODUCT-DATA] Parsing trend Excel: %s", trend_blob_url[:100])
                 trends = await _parse_excel(trend_blob_url)
+                logger.info("[PRODUCT-DATA] Trend parse result: %d items", len(trends))
                 response_data["trends"] = trends
                 response_data["has_trend_data"] = len(trends) > 0
             except Exception as e:
-                logger.warning(f"Failed to parse trend Excel: {e}")
+                logger.warning(f"Failed to parse trend Excel: {e}", exc_info=True)
 
+        response_data["_debug"] = {
+            "product_blob_url_present": product_blob_url is not None,
+            "trend_blob_url_present": trend_blob_url is not None,
+            "product_blob_url_prefix": product_blob_url[:60] if product_blob_url else None,
+            "trend_blob_url_prefix": trend_blob_url[:60] if trend_blob_url else None,
+        }
         return response_data
 
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error(f"Failed to fetch product data: {exc}")
+        logger.error(f"Failed to fetch product data: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to fetch product data: {exc}")
 
 
@@ -1415,3 +1428,26 @@ for sub in [clips_router, products_router, sales_router, excel_router]:
     for route in sub.routes:
         router.routes.append(route)
 
+
+
+@router.get("/_debug/storage-info")
+async def debug_storage_info(current_user=Depends(get_current_user)):
+    """Temporary debug endpoint to check storage configuration."""
+    from app.services.storage_service import ACCOUNT_NAME, CONNECTION_STRING, CONTAINER_NAME, generate_read_sas_from_url
+    # Test SAS generation with a known blob URL
+    test_url = "https://aitherhub.blob.core.windows.net/videos/ryuhairartist@gmail.com/660e5b15-0e7f-4c35-8461-4240270671af/excel/ryukyogoku_7601169698369096456_product.xlsx"
+    sas_result = None
+    sas_error = None
+    try:
+        sas_result = generate_read_sas_from_url(test_url, expires_hours=1)
+    except Exception as e:
+        sas_error = str(e)
+    return {
+        "account_name": ACCOUNT_NAME or "(empty)",
+        "has_connection_string": bool(CONNECTION_STRING),
+        "connection_string_len": len(CONNECTION_STRING) if CONNECTION_STRING else 0,
+        "container": CONTAINER_NAME,
+        "sas_test_success": sas_result is not None,
+        "sas_test_url_prefix": sas_result[:80] if sas_result else None,
+        "sas_test_error": sas_error,
+    }
