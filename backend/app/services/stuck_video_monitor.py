@@ -48,21 +48,31 @@ async def _check_and_requeue_stuck_videos():
                 #   QUEUED, or starts with STEP_
                 # - updated_at is older than threshold
                 # - dequeue_count (auto-retry counter) < MAX_AUTO_RETRIES
+                # worker_claimed_at guard: if a worker claimed the job
+                # within the last 3 hours, the job is likely still running
+                # (e.g. STEP_14 split wait can take up to 2h).
+                # Only requeue if BOTH updated_at AND worker_claimed_at are stale.
+                worker_guard = datetime.now(timezone.utc) - timedelta(hours=3)
+
                 sql = text("""
                     SELECT v.id, v.original_filename, v.status, v.user_id,
                            v.updated_at, v.dequeue_count,
+                           v.worker_claimed_at,
                            u.email as user_email
                     FROM videos v
                     LEFT JOIN users u ON v.user_id = u.id
                     WHERE (v.status IN ('uploaded', 'QUEUED')
                            OR v.status LIKE 'STEP_%')
                       AND v.updated_at < :threshold
+                      AND (v.worker_claimed_at IS NULL
+                           OR v.worker_claimed_at < :worker_guard)
                       AND COALESCE(v.dequeue_count, 0) < :max_retries
                     ORDER BY v.updated_at ASC
                     LIMIT 10
                 """)
                 result = await db.execute(sql, {
                     "threshold": threshold,
+                    "worker_guard": worker_guard,
                     "max_retries": MAX_AUTO_RETRIES,
                 })
                 stuck_videos = result.fetchall()

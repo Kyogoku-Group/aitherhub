@@ -1622,9 +1622,21 @@ def main():
             waited = 0
             last_progress_status = None
             last_progress_time = time.time()
+            last_heartbeat_time = time.time()
+            HEARTBEAT_INTERVAL = 60  # Update updated_at every 60 seconds
 
             while True:
                 split_status = get_video_split_status_sync(video_id)
+
+                # Heartbeat: periodically touch updated_at to prevent
+                # stuck_video_monitor from misidentifying this as stuck
+                if time.time() - last_heartbeat_time >= HEARTBEAT_INTERVAL:
+                    try:
+                        # Re-write current progress; updated_at is set by the SQL
+                        update_video_step_progress_sync(video_id, 0)
+                    except Exception:
+                        pass
+                    last_heartbeat_time = time.time()
 
                 if split_status == "done":
                     logger.info("[FINALIZE] Split DONE \u2192 mark video DONE")

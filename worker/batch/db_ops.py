@@ -793,7 +793,8 @@ async def update_video_step_progress(video_id: str, step_progress: int):
     """Update intra-step progress (0-100) for real-time progress display."""
     sql = text("""
         UPDATE videos
-        SET step_progress = :step_progress
+        SET step_progress = :step_progress,
+            updated_at = now()
         WHERE id = :video_id
     """)
     async with AsyncSessionLocal() as session:
