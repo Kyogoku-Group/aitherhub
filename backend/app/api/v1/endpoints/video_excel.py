@@ -468,7 +468,6 @@ async def get_csv_preview(
     import os as _os
     import openpyxl
     import httpx
-    from azure.storage.blob import generate_blob_sas, BlobSasPermissions
 
     try:
         user_id = current_user["id"]
@@ -500,35 +499,15 @@ async def get_csv_preview(
             }
 
         # SAS URL 生成
-        conn_str = _os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
-        account_name = ""
-        account_key = ""
-        for part in conn_str.split(";"):
-            if part.startswith("AccountName="):
-                account_name = part.split("=", 1)[1]
-            elif part.startswith("AccountKey="):
-                account_key = part.split("=", 1)[1]
-
-        from urllib.parse import urlparse, unquote
-        parsed = urlparse(blob_url)
-        path = unquote(parsed.path)
-        if path.startswith("/videos/"):
-            blob_name = path[len("/videos/"):]
-        else:
-            blob_name = path.lstrip("/")
-            if blob_name.startswith("videos/"):
-                blob_name = blob_name[len("videos/"):]
-
-        expiry = datetime.now(timezone.utc) + timedelta(minutes=30)
-        sas = generate_blob_sas(
-            account_name=account_name,
-            container_name="videos",
-            blob_name=blob_name,
-            account_key=account_key,
-            permission=BlobSasPermissions(read=True),
-            expiry=expiry,
-        )
-        sas_url = f"https://{account_name}.blob.core.windows.net/videos/{blob_name}?{sas}"
+        from app.services.storage_service import generate_read_sas_from_url
+        sas_url = generate_read_sas_from_url(blob_url, expires_hours=1)
+        if not sas_url:
+            return {
+                "video_id": video_id,
+                "asset_type": asset_type,
+                "available": False,
+                "message": "Failed to generate SAS URL",
+            }
 
         # ダウンロードしてパース
         async with httpx.AsyncClient(timeout=30.0) as client:

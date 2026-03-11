@@ -106,6 +106,47 @@ async def generate_upload_sas(email: str, video_id: str | None = None, filename:
     return vid, upload_url, blob_url, expiry
 
 
+def generate_read_sas_from_url(
+    blob_url: str,
+    container: str = CONTAINER_NAME,
+    expires_hours: int = 24,
+) -> str | None:
+    """Generate a read-only SAS URL from an existing blob URL.
+
+    This is the **single place** to create SAS tokens for arbitrary blob URLs
+    (e.g. clip URLs, report URLs).  All endpoints should call this instead of
+    inlining the connection-string parsing + generate_blob_sas logic.
+
+    Returns the full SAS URL, or *None* if credentials are unavailable.
+    """
+    if not CONNECTION_STRING:
+        return None
+    try:
+        parts = blob_url.split("/")
+        # Find container in URL path and extract blob_name after it
+        container_idx = parts.index(container) if container in parts else -1
+        if container_idx < 0 or container_idx + 1 >= len(parts):
+            return None
+        blob_name = "/".join(parts[container_idx + 1:])
+        # Strip any existing query string from blob_name
+        if "?" in blob_name:
+            blob_name = blob_name.split("?", 1)[0]
+        account_key = _parse_account_key(CONNECTION_STRING)
+        expiry = datetime.now(timezone.utc) + timedelta(hours=expires_hours)
+        sas = generate_blob_sas(
+            account_name=ACCOUNT_NAME,
+            container_name=container,
+            blob_name=blob_name,
+            account_key=account_key,
+            permission=BlobSasPermissions(read=True),
+            expiry=expiry,
+        )
+        base_url = blob_url.split("?", 1)[0]  # strip old query
+        return f"{base_url}?{sas}"
+    except Exception:
+        return None
+
+
 async def generate_download_sas(email: str, video_id: str, filename: str | None = None, expires_in_minutes: int | None = None) -> Tuple[str, datetime]:
     """
     Generate a read-only SAS URL for downloading a blob with folder structure: email/video_id/filename

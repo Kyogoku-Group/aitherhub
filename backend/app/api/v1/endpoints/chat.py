@@ -354,45 +354,12 @@ async def stream_chat(
                     import tempfile
                     import openpyxl
                     import json as _json
-                    from azure.storage.blob import generate_blob_sas, BlobSasPermissions
-                    from datetime import timedelta, datetime, timezone
-                    from urllib.parse import urlparse, unquote
-
-                    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
-                    account_name = ""
-                    account_key = ""
-                    for part in conn_str.split(";"):
-                        if part.startswith("AccountName="):
-                            account_name = part.split("=", 1)[1]
-                        elif part.startswith("AccountKey="):
-                            account_key = part.split("=", 1)[1]
-
-                    def _gen_sas(blob_url: str) -> str:
-                        try:
-                            parsed = urlparse(blob_url)
-                            path = unquote(parsed.path)
-                            if path.startswith("/videos/"):
-                                blob_name = path[len("/videos/"):]
-                            else:
-                                blob_name = path.lstrip("/")
-                                if blob_name.startswith("videos/"):
-                                    blob_name = blob_name[len("videos/"):]
-                        except Exception:
-                            filename = blob_url.split("/")[-1].split("?")[0]
-                            blob_name = f"{user_email}/{video_id}/excel/{filename}"
-                        expiry = datetime.now(timezone.utc) + timedelta(minutes=10)
-                        sas = generate_blob_sas(
-                            account_name=account_name,
-                            container_name="videos",
-                            blob_name=blob_name,
-                            account_key=account_key,
-                            permission=BlobSasPermissions(read=True),
-                            expiry=expiry,
-                        )
-                        return f"https://{account_name}.blob.core.windows.net/videos/{blob_name}?{sas}"
+                    from app.services.storage_service import generate_read_sas_from_url
 
                     async def _parse_excel_for_chat(blob_url: str) -> list:
-                        sas_url = _gen_sas(blob_url)
+                        sas_url = generate_read_sas_from_url(blob_url, expires_hours=1)
+                        if not sas_url:
+                            return []
                         async with httpx.AsyncClient(timeout=15.0) as hclient:
                             resp = await hclient.get(sas_url)
                             if resp.status_code != 200:

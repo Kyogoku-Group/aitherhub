@@ -216,61 +216,23 @@ async def get_clip_status(
             if not clip_download_url:
                 # Generate new SAS URL for clip
                 try:
-                    # Get user email
-                    user_sql = text("SELECT email FROM users WHERE id = :user_id")
-                    ures = await db.execute(user_sql, {"user_id": user_id})
-                    user_row = ures.fetchone()
-
-                    if user_row:
-                        # Extract blob path from clip_url
-                        from app.services.storage_service import generate_download_sas
-                        # Parse the clip blob name from the URL
-                        clip_url = row.clip_url
-                        # clip_url format: https://account.blob.core.windows.net/container/email/video_id/clips/clip_X_Y.mp4
-                        parts = clip_url.split("/")
-                        # Find the email/video_id/clips/filename part
-                        try:
-                            container_idx = parts.index("videos") if "videos" in parts else -1
-                            if container_idx >= 0 and container_idx + 1 < len(parts):
-                                blob_path = "/".join(parts[container_idx + 1:])
-                                from azure.storage.blob import generate_blob_sas, BlobSasPermissions
-                                import os as _os
-                                conn_str = _os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
-                                account_name = ""
-                                account_key = ""
-                                for p in conn_str.split(";"):
-                                    if p.startswith("AccountName="):
-                                        account_name = p.split("=", 1)[1]
-                                    if p.startswith("AccountKey="):
-                                        account_key = p.split("=", 1)[1]
-
-                                if account_name and account_key:
-                                    expiry_dt = datetime.now(timezone.utc) + timedelta(hours=24)
-                                    sas = generate_blob_sas(
-                                        account_name=account_name,
-                                        container_name="videos",
-                                        blob_name=blob_path,
-                                        account_key=account_key,
-                                        permission=BlobSasPermissions(read=True),
-                                        expiry=expiry_dt,
-                                    )
-                                    clip_download_url = f"https://{account_name}.blob.core.windows.net/videos/{blob_path}?{sas}"
-                                    clip_download_url = _replace_blob_url_to_cdn(clip_download_url)
-
-                                    # Cache the SAS token
-                                    update_sql = text("""
-                                        UPDATE video_clips
-                                        SET sas_token = :sas_token, sas_expireddate = :expiry
-                                        WHERE id = :id
-                                    """)
-                                    await db.execute(update_sql, {
-                                        "sas_token": clip_download_url,
-                                        "expiry": expiry_dt,
-                                        "id": row.id,
-                                    })
-                                    await db.commit()
-                        except Exception as e:
-                            logger.warning(f"Failed to parse clip blob path: {e}")
+                    from app.services.storage_service import generate_read_sas_from_url
+                    sas_url = generate_read_sas_from_url(row.clip_url)
+                    if sas_url:
+                        clip_download_url = _replace_blob_url_to_cdn(sas_url)
+                        # Cache the SAS token
+                        expiry_dt = datetime.now(timezone.utc) + timedelta(hours=24)
+                        update_sql = text("""
+                            UPDATE video_clips
+                            SET sas_token = :sas_token, sas_expireddate = :expiry
+                            WHERE id = :id
+                        """)
+                        await db.execute(update_sql, {
+                            "sas_token": clip_download_url,
+                            "expiry": expiry_dt,
+                            "id": row.id,
+                        })
+                        await db.commit()
                 except Exception as e:
                     logger.warning(f"Failed to generate clip SAS: {e}")
 
@@ -350,49 +312,23 @@ async def list_clips(
                         clip_download_url = row.sas_token
 
                 if not clip_download_url:
-                    # Generate new SAS URL for clip
                     try:
-                        clip_url = row.clip_url
-                        parts = clip_url.split("/")
-                        container_idx = parts.index("videos") if "videos" in parts else -1
-                        if container_idx >= 0 and container_idx + 1 < len(parts):
-                            blob_path = "/".join(parts[container_idx + 1:])
-                            from azure.storage.blob import generate_blob_sas, BlobSasPermissions
-                            import os as _os
-                            conn_str = _os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
-                            account_name = ""
-                            account_key = ""
-                            for p in conn_str.split(";"):
-                                if p.startswith("AccountName="):
-                                    account_name = p.split("=", 1)[1]
-                                if p.startswith("AccountKey="):
-                                    account_key = p.split("=", 1)[1]
-
-                            if account_name and account_key:
-                                expiry_dt = datetime.now(timezone.utc) + timedelta(hours=24)
-                                sas = generate_blob_sas(
-                                    account_name=account_name,
-                                    container_name="videos",
-                                    blob_name=blob_path,
-                                    account_key=account_key,
-                                    permission=BlobSasPermissions(read=True),
-                                    expiry=expiry_dt,
-                                )
-                                clip_download_url = f"https://{account_name}.blob.core.windows.net/videos/{blob_path}?{sas}"
-                                clip_download_url = _replace_blob_url_to_cdn(clip_download_url)
-
-                                # Cache the SAS token
-                                update_sql = text("""
-                                    UPDATE video_clips
-                                    SET sas_token = :sas_token, sas_expireddate = :expiry
-                                    WHERE id = :id
-                                """)
-                                await db.execute(update_sql, {
-                                    "sas_token": clip_download_url,
-                                    "expiry": expiry_dt,
-                                    "id": row.id,
-                                })
-                                await db.commit()
+                        from app.services.storage_service import generate_read_sas_from_url
+                        sas_url = generate_read_sas_from_url(row.clip_url)
+                        if sas_url:
+                            clip_download_url = _replace_blob_url_to_cdn(sas_url)
+                            expiry_dt = datetime.now(timezone.utc) + timedelta(hours=24)
+                            update_sql = text("""
+                                UPDATE video_clips
+                                SET sas_token = :sas_token, sas_expireddate = :expiry
+                                WHERE id = :id
+                            """)
+                            await db.execute(update_sql, {
+                                "sas_token": clip_download_url,
+                                "expiry": expiry_dt,
+                                "id": row.id,
+                            })
+                            await db.commit()
                     except Exception as e:
                         logger.warning(f"Failed to generate clip SAS in list: {e}")
 

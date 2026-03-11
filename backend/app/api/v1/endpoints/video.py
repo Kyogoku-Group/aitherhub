@@ -766,9 +766,7 @@ async def get_video_product_data(
     try:
         import httpx
         import tempfile
-        import os
-        from azure.storage.blob import generate_blob_sas, BlobSasPermissions
-        from datetime import timedelta
+        from app.services.storage_service import generate_read_sas_from_url
 
         # Get video's excel_product_blob_url and user email
         result = await db.execute(
@@ -795,52 +793,13 @@ async def get_video_product_data(
             "has_trend_data": False,
         }
 
-        # Helper: generate SAS download URL from blob URL
-        def _generate_sas_url(blob_url: str) -> str:
-            """Generate a SAS-signed download URL from a raw blob URL."""
-            conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
-            account_name = ""
-            account_key = ""
-            for part in conn_str.split(";"):
-                if part.startswith("AccountName="):
-                    account_name = part.split("=", 1)[1]
-                elif part.startswith("AccountKey="):
-                    account_key = part.split("=", 1)[1]
-
-            # Extract blob path from URL
-            # URL format: https://account.blob.core.windows.net/videos/email/video_id/excel/filename.xlsx
-            try:
-                from urllib.parse import urlparse, unquote
-                parsed = urlparse(blob_url)
-                path = unquote(parsed.path)  # /videos/email/video_id/excel/filename.xlsx
-                # Remove leading /videos/ to get blob_name
-                if path.startswith("/videos/"):
-                    blob_name = path[len("/videos/"):]
-                else:
-                    blob_name = path.lstrip("/")
-                    # Remove container name if present
-                    if blob_name.startswith("videos/"):
-                        blob_name = blob_name[len("videos/"):]
-            except Exception:
-                # Fallback: construct blob name from email/video_id
-                filename = blob_url.split("/")[-1].split("?")[0]
-                blob_name = f"{email}/{video_id}/excel/{filename}"
-
-            expiry = datetime.now(timezone.utc) + timedelta(minutes=30)
-            sas = generate_blob_sas(
-                account_name=account_name,
-                container_name="videos",
-                blob_name=blob_name,
-                account_key=account_key,
-                permission=BlobSasPermissions(read=True),
-                expiry=expiry,
-            )
-            return f"https://{account_name}.blob.core.windows.net/videos/{blob_name}?{sas}"
-
         # Helper: download and parse Excel file
         async def _parse_excel(blob_url: str) -> list:
             """Download Excel via SAS URL and parse rows into list of dicts."""
-            sas_url = _generate_sas_url(blob_url)
+            sas_url = generate_read_sas_from_url(blob_url, expires_hours=1)
+            if not sas_url:
+                logger.warning("Failed to generate SAS for Excel blob")
+                return []
             import openpyxl
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.get(sas_url)
