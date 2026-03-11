@@ -116,7 +116,7 @@ class AppCreator:
 
 app_creator = AppCreator()
 app = app_creator.app
-db = app_creator.db
+# NOTE: db is now accessed via app.core.db (async sessions), not via container
 container = app_creator.container
 
 
