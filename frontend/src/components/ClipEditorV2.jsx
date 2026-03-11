@@ -65,6 +65,108 @@ const MARKERS = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SUBTITLE STYLE PRESETS
+// ═══════════════════════════════════════════════════════════════════════════
+const SUBTITLE_PRESETS = {
+  simple: {
+    id: 'simple',
+    name: 'シンプル',
+    desc: 'ビジネス系におすすめ',
+    icon: 'Aa',
+    container: {},
+    text: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: 600,
+      textShadow: '0 2px 8px rgba(0,0,0,0.95), 0 0 20px rgba(0,0,0,0.6)',
+      backgroundColor: 'transparent',
+      padding: '4px 8px',
+      borderRadius: 0,
+      letterSpacing: 0.5,
+      lineHeight: 1.6,
+    },
+  },
+  box: {
+    id: 'box',
+    name: 'ボックス',
+    desc: '視認性重視におすすめ',
+    icon: '\u25A0',
+    container: {},
+    text: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: 600,
+      textShadow: '0 2px 6px rgba(0,0,0,0.9)',
+      backgroundColor: 'rgba(0,0,0,0.80)',
+      padding: '8px 18px',
+      borderRadius: 8,
+      letterSpacing: 0.3,
+      lineHeight: 1.5,
+    },
+  },
+  outline: {
+    id: 'outline',
+    name: '縁取り',
+    desc: '目立たせたい時におすすめ',
+    icon: 'A',
+    container: {},
+    text: {
+      color: '#fff',
+      fontSize: 18,
+      fontWeight: 800,
+      textShadow: '-2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000, 0 0 8px rgba(0,0,0,0.8)',
+      backgroundColor: 'transparent',
+      padding: '4px 8px',
+      borderRadius: 0,
+      letterSpacing: 0.5,
+      lineHeight: 1.5,
+      WebkitTextStroke: '1.5px #000',
+      paintOrder: 'stroke fill',
+    },
+  },
+  pop: {
+    id: 'pop',
+    name: 'ポップ',
+    desc: 'TikTok投稿におすすめ',
+    icon: '\u2728',
+    container: {},
+    text: {
+      color: '#FFE135',
+      fontSize: 20,
+      fontWeight: 900,
+      textShadow: '-2px -2px 0 #FF6B35, 2px -2px 0 #FF6B35, -2px 2px 0 #FF6B35, 2px 2px 0 #FF6B35, 0 4px 12px rgba(0,0,0,0.7)',
+      backgroundColor: 'transparent',
+      padding: '4px 12px',
+      borderRadius: 0,
+      letterSpacing: 1,
+      lineHeight: 1.4,
+      WebkitTextStroke: '1px #FF6B35',
+      paintOrder: 'stroke fill',
+    },
+  },
+  gradient: {
+    id: 'gradient',
+    name: 'グラデーション',
+    desc: '美容系におすすめ',
+    icon: '\u{1F308}',
+    container: {},
+    text: {
+      color: '#fff',
+      fontSize: 16,
+      fontWeight: 700,
+      textShadow: '0 2px 6px rgba(0,0,0,0.6)',
+      background: 'linear-gradient(135deg, rgba(139,92,246,0.85), rgba(236,72,153,0.85))',
+      padding: '8px 20px',
+      borderRadius: 20,
+      letterSpacing: 0.5,
+      lineHeight: 1.5,
+    },
+  },
+};
+
+const SUBTITLE_PRESET_ORDER = ['simple', 'box', 'outline', 'pop', 'gradient'];
+
+// ═══════════════════════════════════════════════════════════════════════════
 const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
   const videoRef = useRef(null);
   const timelineRef = useRef(null);
@@ -91,6 +193,18 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
   const [captions, setCaptions] = useState([]);
   const [savingCaps, setSavingCaps] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
+
+  // Subtitle style & position
+  const [subtitleStyle, setSubtitleStyle] = useState('box');
+  const [subtitlePos, setSubtitlePos] = useState({ x: 50, y: 85 }); // percentage
+  const [isDraggingSub, setIsDraggingSub] = useState(false);
+  const subtitleContainerRef = useRef(null);
+  const videoContainerRef = useRef(null);
+
+  // Subtitle feedback
+  const [subtitleFeedback, setSubtitleFeedback] = useState(null); // 'up' | 'down' | null
+  const [feedbackTags, setFeedbackTags] = useState([]);
+  const [feedbackSaved, setFeedbackSaved] = useState(false);
 
   const clipDur = trimEnd - trimStart;
 
@@ -454,9 +568,88 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
     }
   };
 
-  // ═══════════════════════════════════════════════════════════════
+    // ─── Pop style: alternate font sizes for visual rhythm ───
+  const renderPopText = (text) => {
+    if (!text) return null;
+    // Split into characters and alternate sizes
+    const chars = [...text];
+    const popColors = ['#FFE135', '#FF6B35', '#FF3CAC', '#00F5D4', '#FFF'];
+    return chars.map((ch, i) => {
+      const sizeVariant = i % 3 === 0 ? 1.3 : i % 3 === 1 ? 0.85 : 1.1;
+      const colorIdx = Math.floor(i / 2) % popColors.length;
+      return (
+        <span
+          key={i}
+          style={{
+            fontSize: `${(SUBTITLE_PRESETS.pop.text.fontSize * sizeVariant)}px`,
+            color: popColors[colorIdx],
+            display: 'inline',
+          }}
+        >
+          {ch}
+        </span>
+      );
+    });
+  };
+
+  // ─── AI Recommended style based on video genre ───
+  const getAiRecommendedStyle = () => {
+    // Determine recommendation based on video metadata
+    const tags = videoData?.tags || [];
+    const title = videoData?.title || clip?.description || '';
+    const titleLower = title.toLowerCase();
+
+    if (tags.some(t => /美容|コスメ|スキンケア|beauty/i.test(t)) || /美容|コスメ/i.test(titleLower)) {
+      return { style: 'gradient', reason: '美容系コンテンツに最適' };
+    }
+    if (tags.some(t => /エンタメ|お笑い|バラエティ|funny|viral/i.test(t)) || /バズ|爆笑/i.test(titleLower)) {
+      return { style: 'pop', reason: 'エンタメ系に最適・インパクト大' };
+    }
+    if (tags.some(t => /ビジネス|解説|教育|business/i.test(t)) || /解説|まとめ/i.test(titleLower)) {
+      return { style: 'simple', reason: 'ビジネス系・読みやすさ重視' };
+    }
+    if (clip?.ai_score && clip.ai_score >= 80) {
+      return { style: 'outline', reason: '高スコアクリップ・目立たせるスタイル' };
+    }
+    return { style: 'box', reason: '万能型・どんな動画にも合う' };
+  };
+
+  const aiRecommendation = useMemo(() => getAiRecommendedStyle(), [videoData, clip]);
+
+  // ─── Feedback tags ───
+  const FEEDBACK_TAGS = [
+    '見やすい', '目立つ', 'おしゃれ', 'ポップ',
+    '落ち着いた', '文字が小さい', '文字が大きい', '色を変えたい',
+  ];
+
+  const toggleFeedbackTag = (tag) => {
+    setFeedbackTags(prev =>
+      prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
+    );
+    setFeedbackSaved(false);
+  };
+
+  const saveFeedback = async () => {
+    try {
+      // Save feedback to backend (future: dedicated API)
+      console.log('[SubtitleFeedback]', {
+        videoId,
+        clipId: clip?.clip_id,
+        style: subtitleStyle,
+        vote: subtitleFeedback,
+        tags: feedbackTags,
+        position: subtitlePos,
+      });
+      setFeedbackSaved(true);
+      setStatus({ ok: true, msg: 'フィードバックを保存しました' });
+    } catch (e) {
+      setStatus({ ok: false, msg: `フィードバック保存失敗: ${e.message}` });
+    }
+  };
+
+  // ═══════════════════════════════════════════════════════════
   // RENDER
-  // ═══════════════════════════════════════════════════════════════
+  // ═════════════════════════════════════════════════════════════════
   return (
     <div
       style={{
@@ -546,6 +739,16 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
         >
           {/* Inner container maintains 9:16 aspect ratio, height-based */}
           <div
+            ref={videoContainerRef}
+            onMouseMove={(e) => {
+              if (!isDraggingSub || !videoContainerRef.current) return;
+              const rect = videoContainerRef.current.getBoundingClientRect();
+              const x = Math.max(5, Math.min(95, ((e.clientX - rect.left) / rect.width) * 100));
+              const y = Math.max(5, Math.min(95, ((e.clientY - rect.top) / rect.height) * 100));
+              setSubtitlePos({ x, y });
+            }}
+            onMouseUp={() => setIsDraggingSub(false)}
+            onMouseLeave={() => setIsDraggingSub(false)}
             style={{
               position: "relative",
               height: "100%",
@@ -639,37 +842,46 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
             </div>
 
             {/* ★ SUBTITLE OVERLAY ★ */}
-            {currentCaption && (
-              <div
-                style={{
-                  position: "absolute",
-                  bottom: 40,
-                  left: 8,
-                  right: 8,
-                  textAlign: "center",
-                  pointerEvents: "none",
-                  zIndex: 10,
-                }}
-              >
-                <span
+            {currentCaption && (() => {
+              const preset = SUBTITLE_PRESETS[subtitleStyle] || SUBTITLE_PRESETS.box;
+              const presetText = preset.text || {};
+              return (
+                <div
+                  ref={subtitleContainerRef}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setIsDraggingSub(true);
+                  }}
                   style={{
-                    display: "inline-block",
-                    padding: "8px 18px",
-                    borderRadius: 8,
-                    backgroundColor: "rgba(0,0,0,0.80)",
-                    color: currentCaption.emphasis ? C.yellow : "#fff",
-                    fontSize: 16,
-                    fontWeight: currentCaption.emphasis ? 800 : 600,
-                    lineHeight: 1.5,
+                    position: "absolute",
+                    left: `${subtitlePos.x}%`,
+                    top: `${subtitlePos.y}%`,
+                    transform: "translate(-50%, -50%)",
+                    textAlign: "center",
+                    pointerEvents: "auto",
+                    zIndex: 10,
+                    cursor: isDraggingSub ? "grabbing" : "grab",
                     maxWidth: "95%",
-                    textShadow: "0 2px 6px rgba(0,0,0,0.9)",
-                    letterSpacing: 0.3,
+                    userSelect: "none",
+                    transition: isDraggingSub ? 'none' : 'left 0.1s ease, top 0.1s ease',
                   }}
                 >
-                  {currentCaption.text}
-                </span>
-              </div>
-            )}
+                  <span
+                    style={{
+                      display: "inline-block",
+                      ...presetText,
+                      ...(currentCaption.emphasis && subtitleStyle !== 'pop' ? {
+                        color: C.yellow,
+                        fontWeight: 800,
+                      } : {}),
+                    }}
+                  >
+                    {subtitleStyle === 'pop' ? renderPopText(currentCaption.text) : currentCaption.text}
+                  </span>
+                </div>
+              );
+            })()}
           </div>
         </div>
 
@@ -862,6 +1074,243 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
             {/* ─── 字幕 ─── */}
             {tab === "captions" && (
               <div>
+                {/* ═══ 字幕スタイル選択 ═══ */}
+                <SectionTitle>字幕スタイル</SectionTitle>
+
+                {/* AIおすすめバッジ */}
+                <div
+                  onClick={() => setSubtitleStyle(aiRecommendation.style)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '8px 12px',
+                    marginBottom: 10,
+                    borderRadius: 8,
+                    backgroundColor: subtitleStyle === aiRecommendation.style ? C.accent + '22' : C.surfaceLight,
+                    border: `1px solid ${subtitleStyle === aiRecommendation.style ? C.accent : C.border}`,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  <span style={{ fontSize: 14 }}>\u2728</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: C.accent, fontSize: 11, fontWeight: 700 }}>AIおすすめ</div>
+                    <div style={{ color: C.textMuted, fontSize: 10 }}>
+                      {SUBTITLE_PRESETS[aiRecommendation.style]?.name} — {aiRecommendation.reason}
+                    </div>
+                  </div>
+                  {subtitleStyle === aiRecommendation.style && (
+                    <span style={{ color: C.accent, fontSize: 12, fontWeight: 700 }}>\u2713</span>
+                  )}
+                </div>
+
+                {/* スタイルプリセットグリッド */}
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(5, 1fr)',
+                  gap: 6,
+                  marginBottom: 14,
+                }}>
+                  {SUBTITLE_PRESET_ORDER.map((key) => {
+                    const p = SUBTITLE_PRESETS[key];
+                    const isActive = subtitleStyle === key;
+                    const isAiPick = aiRecommendation.style === key;
+                    return (
+                      <div
+                        key={key}
+                        onClick={() => setSubtitleStyle(key)}
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          gap: 4,
+                          padding: '8px 4px',
+                          borderRadius: 8,
+                          backgroundColor: isActive ? C.accent + '22' : C.surfaceLight,
+                          border: `2px solid ${isActive ? C.accent : 'transparent'}`,
+                          cursor: 'pointer',
+                          transition: 'all 0.2s ease',
+                          position: 'relative',
+                        }}
+                      >
+                        {isAiPick && (
+                          <span style={{
+                            position: 'absolute',
+                            top: -4,
+                            right: -4,
+                            fontSize: 10,
+                            backgroundColor: C.accent,
+                            color: '#fff',
+                            borderRadius: 10,
+                            padding: '0 4px',
+                            fontWeight: 700,
+                            lineHeight: '16px',
+                          }}>AI</span>
+                        )}
+                        {/* Mini preview */}
+                        <div style={{
+                          width: '100%',
+                          height: 32,
+                          borderRadius: 4,
+                          backgroundColor: '#000',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          overflow: 'hidden',
+                        }}>
+                          <span style={{
+                            fontSize: 11,
+                            fontWeight: p.text.fontWeight || 600,
+                            color: p.text.color || '#fff',
+                            textShadow: (p.text.textShadow || '').slice(0, 60),
+                            backgroundColor: p.text.backgroundColor || 'transparent',
+                            background: p.text.background || p.text.backgroundColor || 'transparent',
+                            padding: '2px 6px',
+                            borderRadius: p.text.borderRadius || 0,
+                            WebkitTextStroke: p.text.WebkitTextStroke || 'none',
+                            paintOrder: p.text.paintOrder || 'normal',
+                          }}>{p.icon}</span>
+                        </div>
+                        <span style={{ color: isActive ? C.accent : C.textMuted, fontSize: 9, fontWeight: 600 }}>
+                          {p.name}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* 位置リセットボタン */}
+                <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+                  <button
+                    onClick={() => setSubtitlePos({ x: 50, y: 85 })}
+                    style={{
+                      flex: 1,
+                      padding: '6px 8px',
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 6,
+                      backgroundColor: C.surfaceLight,
+                      color: C.textMuted,
+                      fontSize: 10,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    \u2193 下配置
+                  </button>
+                  <button
+                    onClick={() => setSubtitlePos({ x: 50, y: 50 })}
+                    style={{
+                      flex: 1,
+                      padding: '6px 8px',
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 6,
+                      backgroundColor: C.surfaceLight,
+                      color: C.textMuted,
+                      fontSize: 10,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    \u2194 中央配置
+                  </button>
+                  <button
+                    onClick={() => setSubtitlePos({ x: 50, y: 15 })}
+                    style={{
+                      flex: 1,
+                      padding: '6px 8px',
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 6,
+                      backgroundColor: C.surfaceLight,
+                      color: C.textMuted,
+                      fontSize: 10,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    \u2191 上配置
+                  </button>
+                </div>
+
+                <p style={{ color: C.textDim, fontSize: 9, margin: '0 0 14px', textAlign: 'center' }}>
+                  プレビュー上の字幕をドラッグして位置を調整できます
+                </p>
+
+                {/* ═══ 字幕フィードバック ═══ */}
+                <SectionTitle>字幕フィードバック</SectionTitle>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                  {['up', 'down'].map((vote) => (
+                    <button
+                      key={vote}
+                      onClick={() => { setSubtitleFeedback(prev => prev === vote ? null : vote); setFeedbackSaved(false); }}
+                      style={{
+                        flex: 1,
+                        padding: '8px 12px',
+                        border: `1px solid ${subtitleFeedback === vote ? (vote === 'up' ? C.green : C.red) : C.border}`,
+                        borderRadius: 8,
+                        backgroundColor: subtitleFeedback === vote
+                          ? (vote === 'up' ? C.green + '22' : C.red + '22')
+                          : C.surfaceLight,
+                        color: subtitleFeedback === vote
+                          ? (vote === 'up' ? C.green : C.red)
+                          : C.textMuted,
+                        fontSize: 16,
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                      }}
+                    >
+                      {vote === 'up' ? '\uD83D\uDC4D' : '\uD83D\uDC4E'}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 10 }}>
+                  {FEEDBACK_TAGS.map((tag) => {
+                    const isSelected = feedbackTags.includes(tag);
+                    return (
+                      <button
+                        key={tag}
+                        onClick={() => toggleFeedbackTag(tag)}
+                        style={{
+                          padding: '4px 10px',
+                          border: `1px solid ${isSelected ? C.accent : C.border}`,
+                          borderRadius: 16,
+                          backgroundColor: isSelected ? C.accent + '22' : 'transparent',
+                          color: isSelected ? C.accent : C.textMuted,
+                          fontSize: 10,
+                          cursor: 'pointer',
+                          transition: 'all 0.2s ease',
+                        }}
+                      >
+                        {tag}
+                      </button>
+                    );
+                  })}
+                </div>
+                {(subtitleFeedback || feedbackTags.length > 0) && !feedbackSaved && (
+                  <button
+                    onClick={saveFeedback}
+                    style={{
+                      width: '100%',
+                      padding: '8px 16px',
+                      border: 'none',
+                      borderRadius: 8,
+                      backgroundColor: C.green,
+                      color: '#fff',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      marginBottom: 14,
+                    }}
+                  >
+                    フィードバックを保存
+                  </button>
+                )}
+                {feedbackSaved && (
+                  <p style={{ color: C.green, fontSize: 10, textAlign: 'center', margin: '0 0 14px' }}>
+                    \u2713 フィードバックを保存しました。AIが学習します。
+                  </p>
+                )}
+
+                <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, marginTop: 4 }} />
+
+                {/* ═══ 字幕編集 ═══ */}
                 <SectionTitle>字幕編集</SectionTitle>
                 <p style={{ color: C.textMuted, fontSize: 11, margin: "0 0 10px", lineHeight: 1.5 }}>
                   配信者の音声書き起こしです。テキストを直接編集できます。タイムスタンプをクリックするとその位置にジャンプします。
