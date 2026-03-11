@@ -65,6 +65,22 @@ class TranscribeRequest(BaseModel):
     phase_index: Optional[int] = Field(None, description="Phase index of the clip")
 
 
+class SubtitleCaption(BaseModel):
+    start: float
+    end: float
+    text: str
+    words: Optional[list] = None
+
+
+class ExportSubtitledClipRequest(BaseModel):
+    clip_url: str = Field(..., description="URL of the source clip video")
+    captions: list[SubtitleCaption] = Field(..., description="List of caption segments")
+    style: str = Field(default="box", description="Subtitle style preset name")
+    position_x: float = Field(default=50.0, description="Subtitle X position (0-100%)")
+    position_y: float = Field(default=85.0, description="Subtitle Y position (0-100%)")
+    time_start: float = Field(default=0.0, description="Clip start time for offset calculation")
+
+
 # ─── ① Segment Scores ─────────────────────────────────────────────────────
 
 @router.get("/{video_id}/segments")
@@ -765,19 +781,37 @@ async def transcribe_clip(
                     file=f,
                     response_format="verbose_json",
                     language="ja",
-                    timestamp_granularities=["segment"],
+                    timestamp_granularities=["segment", "word"],
                 )
 
             segs = []
+            # Extract word-level timestamps if available (for karaoke-style highlighting)
+            words_list = []
+            if hasattr(response, "words") and response.words:
+                for w in response.words:
+                    ws = getattr(w, "start", 0) if hasattr(w, "start") else w.get("start", 0)
+                    we = getattr(w, "end", 0) if hasattr(w, "end") else w.get("end", 0)
+                    wt = getattr(w, "word", "") if hasattr(w, "word") else w.get("word", "")
+                    words_list.append({"start": float(ws), "end": float(we), "word": wt.strip()})
+                logger.info(f"[transcribe] Got {len(words_list)} word-level timestamps")
+
             if hasattr(response, "segments") and response.segments:
                 for seg in response.segments:
                     s = getattr(seg, "start", 0) if hasattr(seg, "start") else seg.get("start", 0)
                     e = getattr(seg, "end", 0) if hasattr(seg, "end") else seg.get("end", 0)
                     t = getattr(seg, "text", "") if hasattr(seg, "text") else seg.get("text", "")
-                    segs.append({"start": float(s), "end": float(e), "text": t.strip()})
+                    # Attach word-level timestamps that fall within this segment
+                    seg_words = [w for w in words_list if w["start"] >= float(s) and w["end"] <= float(e)]
+                    seg_data = {"start": float(s), "end": float(e), "text": t.strip()}
+                    if seg_words:
+                        seg_data["words"] = seg_words
+                    segs.append(seg_data)
             elif hasattr(response, "text") and response.text:
                 duration = req.time_end - req.time_start
-                segs.append({"start": 0.0, "end": duration, "text": response.text.strip()})
+                seg_data = {"start": 0.0, "end": duration, "text": response.text.strip()}
+                if words_list:
+                    seg_data["words"] = words_list
+                segs.append(seg_data)
             return segs
 
         # Always extract audio first to reduce file size (video track is not needed)
@@ -862,14 +896,21 @@ async def transcribe_clip(
     for i, seg in enumerate(segments):
         abs_start = req.time_start + seg["start"]
         abs_end = req.time_start + seg["end"]
-        absolute_segments.append({
+        seg_data = {
             "segment_index": i,
             "start": abs_start,
             "end": abs_end,
             "local_start": seg["start"],
             "local_end": seg["end"],
             "text": seg["text"],
-        })
+        }
+        # Include word-level timestamps (for karaoke-style highlighting)
+        if "words" in seg and seg["words"]:
+            seg_data["words"] = [
+                {"start": w["start"], "end": w["end"], "word": w["word"]}
+                for w in seg["words"]
+            ]
+        absolute_segments.append(seg_data)
 
     # Save to video_transcripts table
     saved_count = 0
@@ -968,6 +1009,224 @@ async def transcribe_clip(
         "time_end": req.time_end,
         "source": "whisper",
     }
+
+
+# ─── ⑦ Export Subtitled Clip ──────────────────────────────────────────────
+
+# ASS subtitle style presets (matching frontend SUBTITLE_PRESETS)
+_ASS_STYLES = {
+    'simple': {
+        'fontsize': 20, 'bold': 1, 'primary_color': '&H00FFFFFF',
+        'outline_color': '&H00000000', 'outline': 0, 'shadow': 3,
+        'border_style': 1, 'back_color': '&H00000000',
+    },
+    'box': {
+        'fontsize': 20, 'bold': 1, 'primary_color': '&H00FFFFFF',
+        'outline_color': '&H00000000', 'outline': 0, 'shadow': 0,
+        'border_style': 3, 'back_color': '&HCC000000',
+    },
+    'outline': {
+        'fontsize': 22, 'bold': 1, 'primary_color': '&H00FFFFFF',
+        'outline_color': '&H00000000', 'outline': 3, 'shadow': 0,
+        'border_style': 1, 'back_color': '&H00000000',
+    },
+    'pop': {
+        'fontsize': 24, 'bold': 1, 'primary_color': '&H0035E1FF',
+        'outline_color': '&H00356BFF', 'outline': 2, 'shadow': 3,
+        'border_style': 1, 'back_color': '&H00000000',
+    },
+    'gradient': {
+        'fontsize': 20, 'bold': 1, 'primary_color': '&H00FFFFFF',
+        'outline_color': '&H00000000', 'outline': 0, 'shadow': 0,
+        'border_style': 3, 'back_color': '&HAA8B5CF6',
+    },
+    'karaoke': {
+        'fontsize': 22, 'bold': 1, 'primary_color': '&H8AFFFFFF',
+        'outline_color': '&H00000000', 'outline': 0, 'shadow': 0,
+        'border_style': 3, 'back_color': '&HB3000000',
+        'secondary_color': '&H0035E1FF',  # karaoke highlight color
+    },
+}
+
+
+def _seconds_to_ass_time(seconds: float) -> str:
+    """Convert seconds to ASS time format: H:MM:SS.cc"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    cs = int((seconds % 1) * 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def _generate_ass_content(captions: list, style: str, position_x: float, position_y: float, time_offset: float = 0) -> str:
+    """Generate ASS subtitle file content."""
+    s = _ASS_STYLES.get(style, _ASS_STYLES['box'])
+    is_karaoke = style == 'karaoke'
+
+    # Calculate ASS position (\pos tag)
+    # ASS uses pixel coordinates, but we'll use \an (alignment) + \pos for percentage-based
+    # Map position_y to alignment: top(\an8), middle(\an5), bottom(\an2)
+    if position_y < 33:
+        alignment = 8  # top-center
+    elif position_y < 66:
+        alignment = 5  # middle-center
+    else:
+        alignment = 2  # bottom-center
+
+    ass = "[Script Info]\n"
+    ass += "ScriptType: v4.00+\n"
+    ass += "PlayResX: 1080\n"
+    ass += "PlayResY: 1920\n"
+    ass += "WrapStyle: 0\n\n"
+    ass += "[V4+ Styles]\n"
+    ass += "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+
+    secondary = s.get('secondary_color', '&H0000FFFF')
+    ass += f"Style: Default,Noto Sans JP,{s['fontsize']},{s['primary_color']},{secondary},{s['outline_color']},{s['back_color']},{s['bold']},0,0,0,100,100,0,0,{s['border_style']},{s['outline']},{s['shadow']},{alignment},20,20,30,1\n\n"
+
+    ass += "[Events]\n"
+    ass += "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+
+    for cap in captions:
+        # Calculate local time (relative to clip start)
+        local_start = cap.start - time_offset if time_offset > 0 else cap.start
+        local_end = cap.end - time_offset if time_offset > 0 else cap.end
+        if local_start < 0:
+            local_start = 0
+        if local_end <= local_start:
+            continue
+
+        start_ts = _seconds_to_ass_time(local_start)
+        end_ts = _seconds_to_ass_time(local_end)
+
+        if is_karaoke and cap.words:
+            # Generate karaoke timing tags (\kf for smooth fill)
+            karaoke_text = ""
+            for w in cap.words:
+                w_start = w.get('start', 0) - time_offset if time_offset > 0 else w.get('start', 0)
+                w_end = w.get('end', 0) - time_offset if time_offset > 0 else w.get('end', 0)
+                duration_cs = max(1, int((w_end - w_start) * 100))
+                karaoke_text += f"{{\\kf{duration_cs}}}{w.get('word', '')}"
+            ass += f"Dialogue: 0,{start_ts},{end_ts},Default,,0,0,0,,{karaoke_text}\n"
+        else:
+            # Escape ASS special characters
+            text = cap.text.replace('\n', '\\N')
+            ass += f"Dialogue: 0,{start_ts},{end_ts},Default,,0,0,0,,{text}\n"
+
+    return ass
+
+
+@router.post("/{video_id}/export-subtitled")
+async def export_subtitled_clip(
+    video_id: str,
+    req: ExportSubtitledClipRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate a subtitled MP4 clip using ffmpeg with ASS subtitles.
+    Downloads the source clip, generates ASS subtitle file,
+    burns subtitles into video, and returns the result URL.
+    """
+    import shutil
+
+    try:
+        uuid.UUID(video_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid video_id")
+
+    if not req.captions:
+        raise HTTPException(status_code=400, detail="No captions provided")
+
+    tmp_dir = tempfile.mkdtemp(prefix="export_sub_")
+    try:
+        # Step 1: Download source clip
+        video_path = os.path.join(tmp_dir, "source.mp4")
+        clip_url = req.clip_url
+
+        # Add SAS token if needed (same logic as transcribe)
+        if "blob.core.windows.net" in clip_url and "sig=" not in clip_url:
+            try:
+                from app.services.azure_storage import generate_sas_url
+                clip_url = await generate_sas_url(clip_url)
+            except Exception:
+                pass
+
+        import httpx
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.get(clip_url)
+            resp.raise_for_status()
+            with open(video_path, "wb") as f:
+                f.write(resp.content)
+        logger.info(f"[export-sub] Downloaded clip: {os.path.getsize(video_path)} bytes")
+
+        # Step 2: Generate ASS subtitle file
+        ass_path = os.path.join(tmp_dir, "subtitles.ass")
+        ass_content = _generate_ass_content(
+            [c.dict() for c in req.captions],
+            req.style,
+            req.position_x,
+            req.position_y,
+            req.time_start,
+        )
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write(ass_content)
+        logger.info(f"[export-sub] Generated ASS file: {len(req.captions)} captions, style={req.style}")
+
+        # Step 3: Burn subtitles into video with ffmpeg
+        output_path = os.path.join(tmp_dir, "output_subtitled.mp4")
+        # Escape path for ffmpeg filter (backslashes and colons)
+        ass_escaped = ass_path.replace('\\', '/').replace(':', '\\:')
+
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vf", f"ass={ass_escaped}",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            output_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            logger.error(f"[export-sub] ffmpeg failed: {stderr.decode()[:1000]}")
+            raise HTTPException(status_code=500, detail=f"ffmpeg encoding failed: {stderr.decode()[:200]}")
+
+        output_size = os.path.getsize(output_path)
+        logger.info(f"[export-sub] Generated subtitled video: {output_size/1024/1024:.1f} MB")
+
+        # Step 4: Upload to Azure Blob Storage
+        try:
+            from app.services.azure_storage import upload_file_to_blob
+            blob_name = f"exports/{video_id}/subtitled_{uuid.uuid4().hex[:8]}.mp4"
+            download_url = await upload_file_to_blob(output_path, blob_name, content_type="video/mp4")
+            logger.info(f"[export-sub] Uploaded to Azure: {blob_name}")
+        except ImportError:
+            # Fallback: return as base64 or file response
+            from fastapi.responses import FileResponse
+            return FileResponse(
+                output_path,
+                media_type="video/mp4",
+                filename=f"clip_{video_id}_subtitled.mp4",
+            )
+
+        return {
+            "video_id": video_id,
+            "download_url": download_url,
+            "style": req.style,
+            "caption_count": len(req.captions),
+            "file_size": output_size,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[export-sub] Export failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+    finally:
+        _cleanup_tmp(tmp_dir)
 
 
 def _cleanup_tmp(tmp_dir: str):

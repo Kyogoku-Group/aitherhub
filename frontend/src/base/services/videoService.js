@@ -1183,6 +1183,53 @@ class VideoService extends BaseApiService {
   }
 
   /**
+   * Save subtitle feedback (vote + tags) for a clip.
+   * @param {string} videoId
+   * @param {string} clipId
+   * @param {object} feedback - { style, vote, tags, position, ai_recommended_style }
+   */
+  async saveSubtitleFeedback(videoId, clipId, feedback) {
+    try {
+      const response = await this.post(`/api/v1/videos/${videoId}/clips/${clipId}/subtitle-feedback`, feedback);
+      return response;
+    } catch (error) {
+      console.error('Failed to save subtitle feedback:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Save subtitle style and position for a clip.
+   * @param {string} videoId
+   * @param {string} clipId
+   * @param {object} styleData - { style, position_x, position_y }
+   */
+  async saveSubtitleStyle(videoId, clipId, styleData) {
+    try {
+      const response = await this.patch(`/api/v1/videos/${videoId}/clips/${clipId}/subtitle-style`, styleData);
+      return response;
+    } catch (error) {
+      console.error('Failed to save subtitle style:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get AI-recommended subtitle style for a video.
+   * @param {string} videoId
+   * @returns {Promise<{video_id, recommendation, user_feedback_count}>}
+   */
+  async getSubtitleRecommendation(videoId) {
+    try {
+      const response = await this.get(`/api/v1/videos/${videoId}/subtitle-recommend`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get subtitle recommendation:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Get sales moment clips (spike-based clip candidates).
    * @param {string} videoId
    * @param {number} topN
@@ -1403,6 +1450,24 @@ class VideoService extends BaseApiService {
       return response;
     } catch (error) {
       console.error('Failed to transcribe clip:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Export a subtitled clip (burns subtitles into MP4 via ffmpeg).
+   * @param {string} videoId
+   * @param {object} data - { clip_url, captions, style, position_x, position_y, time_start }
+   * @returns {Promise<{video_id, download_url, style, caption_count, file_size}>}
+   */
+  async exportSubtitledClip(videoId, data) {
+    try {
+      const response = await this.post(`/api/v1/editor/${videoId}/export-subtitled`, data, {
+        timeout: 600000, // 10 minutes (ffmpeg encoding can be slow)
+      });
+      return response;
+    } catch (error) {
+      console.error('Failed to export subtitled clip:', error);
       throw error;
     }
   }

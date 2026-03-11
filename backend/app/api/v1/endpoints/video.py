@@ -1070,7 +1070,8 @@ async def get_clip_status(
         user_id = user.get("user_id") or user.get("id")
 
         sql = text("""
-            SELECT id, status, clip_url, sas_token, sas_expireddate, error_message, created_at, captions
+            SELECT id, status, clip_url, sas_token, sas_expireddate, error_message, created_at, captions,
+                   subtitle_style, subtitle_position_x, subtitle_position_y
             FROM video_clips
             WHERE video_id = :video_id AND phase_index = CAST(:phase_index AS text)
             ORDER BY created_at DESC
@@ -1174,6 +1175,14 @@ async def get_clip_status(
         # Include captions (subtitle data) if available
         if hasattr(row, 'captions') and row.captions:
             response["captions"] = row.captions
+
+        # Include subtitle style preferences if available
+        if hasattr(row, 'subtitle_style') and row.subtitle_style:
+            response["subtitle_style"] = row.subtitle_style
+        if hasattr(row, 'subtitle_position_x') and row.subtitle_position_x is not None:
+            response["subtitle_position_x"] = row.subtitle_position_x
+        if hasattr(row, 'subtitle_position_y') and row.subtitle_position_y is not None:
+            response["subtitle_position_y"] = row.subtitle_position_y
 
         return response
 
@@ -4641,3 +4650,219 @@ async def retry_analysis(
         await db.rollback()
         logger.exception(f"[retry-analysis] Failed: {exc}")
         raise HTTPException(status_code=500, detail=f"解析の再試行に失敗しました: {exc}")
+
+
+
+# =========================
+# Subtitle Feedback & Style API
+# =========================
+
+@router.post("/{video_id}/clips/{clip_id}/subtitle-feedback")
+async def save_subtitle_feedback(
+    video_id: str,
+    clip_id: str,
+    request_body: dict,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """
+    Save user feedback on subtitle style.
+
+    Body:
+    {
+        "style": "box",
+        "vote": "up",          // "up" | "down" | null
+        "tags": ["見やすい", "おしゃれ"],
+        "position": {"x": 50, "y": 85},
+        "ai_recommended_style": "gradient"
+    }
+    """
+    try:
+        user_id = user.get("user_id") or user.get("id")
+        style = request_body.get("style", "box")
+        vote = request_body.get("vote")
+        tags = request_body.get("tags", [])
+        position = request_body.get("position", {})
+        ai_recommended = request_body.get("ai_recommended_style")
+
+        import json as _json
+        tags_json = _json.dumps(tags, ensure_ascii=False)
+
+        sql = text("""
+            INSERT INTO subtitle_feedback
+                (video_id, clip_id, user_id, subtitle_style, vote, tags,
+                 position_x, position_y, ai_recommended_style)
+            VALUES
+                (:video_id, :clip_id, :user_id, :style, :vote, :tags::jsonb,
+                 :pos_x, :pos_y, :ai_recommended)
+            RETURNING id
+        """)
+        result = await db.execute(sql, {
+            "video_id": video_id,
+            "clip_id": clip_id,
+            "user_id": user_id,
+            "style": style,
+            "vote": vote,
+            "tags": tags_json,
+            "pos_x": position.get("x", 50),
+            "pos_y": position.get("y", 85),
+            "ai_recommended": ai_recommended,
+        })
+        row = result.fetchone()
+        await db.commit()
+
+        logger.info(f"[SUBTITLE_FEEDBACK] Saved feedback for clip {clip_id}: style={style}, vote={vote}, tags={tags}")
+
+        return {
+            "id": str(row.id) if row else None,
+            "message": "Feedback saved successfully",
+        }
+
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(f"Failed to save subtitle feedback: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to save subtitle feedback: {exc}")
+
+
+@router.patch("/{video_id}/clips/{clip_id}/subtitle-style")
+async def save_subtitle_style(
+    video_id: str,
+    clip_id: str,
+    request_body: dict,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """
+    Save subtitle style and position for a clip.
+
+    Body:
+    {
+        "style": "gradient",
+        "position_x": 50,
+        "position_y": 85
+    }
+    """
+    try:
+        style = request_body.get("style", "box")
+        pos_x = request_body.get("position_x", 50)
+        pos_y = request_body.get("position_y", 85)
+
+        sql = text("""
+            UPDATE video_clips
+            SET subtitle_style = :style,
+                subtitle_position_x = :pos_x,
+                subtitle_position_y = :pos_y,
+                updated_at = NOW()
+            WHERE id = :clip_id AND video_id = :video_id
+        """)
+        await db.execute(sql, {
+            "style": style,
+            "pos_x": pos_x,
+            "pos_y": pos_y,
+            "clip_id": clip_id,
+            "video_id": video_id,
+        })
+        await db.commit()
+
+        logger.info(f"[SUBTITLE_STYLE] Saved style for clip {clip_id}: {style} at ({pos_x}, {pos_y})")
+
+        return {
+            "clip_id": clip_id,
+            "subtitle_style": style,
+            "position_x": pos_x,
+            "position_y": pos_y,
+            "message": "Subtitle style saved successfully",
+        }
+
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(f"Failed to save subtitle style: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to save subtitle style: {exc}")
+
+
+@router.get("/{video_id}/subtitle-recommend")
+async def get_subtitle_recommendation(
+    video_id: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """
+    Get AI-recommended subtitle style based on video metadata and user feedback history.
+    Uses aggregated feedback data to personalize recommendations.
+    """
+    try:
+        user_id = user.get("user_id") or user.get("id")
+
+        # Get video metadata
+        video_sql = text("""
+            SELECT title, tags, status FROM videos WHERE id = :video_id
+        """)
+        vres = await db.execute(video_sql, {"video_id": video_id})
+        video = vres.fetchone()
+
+        # Get user's feedback history (most popular style by upvotes)
+        feedback_sql = text("""
+            SELECT subtitle_style, COUNT(*) as cnt
+            FROM subtitle_feedback
+            WHERE user_id = :user_id AND vote = 'up'
+            GROUP BY subtitle_style
+            ORDER BY cnt DESC
+            LIMIT 3
+        """)
+        fres = await db.execute(feedback_sql, {"user_id": user_id})
+        user_prefs = fres.fetchall()
+
+        # Build recommendation
+        recommendation = {
+            "style": "box",
+            "reason": "万能型・どんな動画にも合う",
+            "confidence": 0.5,
+            "source": "default",
+        }
+
+        # If user has feedback history, use their preferred style
+        if user_prefs and len(user_prefs) > 0:
+            top_style = user_prefs[0].subtitle_style
+            recommendation = {
+                "style": top_style,
+                "reason": f"あなたが最もよく使うスタイル（{len(user_prefs)}件のフィードバックに基づく）",
+                "confidence": min(0.9, 0.5 + len(user_prefs) * 0.1),
+                "source": "user_feedback",
+            }
+        elif video:
+            # Fallback to content-based recommendation
+            title = (video.title or "").lower()
+            tags = video.tags if video.tags else []
+            tags_str = str(tags).lower()
+
+            if any(kw in title or kw in tags_str for kw in ["美容", "コスメ", "スキンケア", "beauty"]):
+                recommendation = {
+                    "style": "gradient",
+                    "reason": "美容系コンテンツに最適",
+                    "confidence": 0.7,
+                    "source": "content_analysis",
+                }
+            elif any(kw in title or kw in tags_str for kw in ["エンタメ", "お笑い", "バラエティ", "funny"]):
+                recommendation = {
+                    "style": "pop",
+                    "reason": "エンタメ系に最適・インパクト大",
+                    "confidence": 0.7,
+                    "source": "content_analysis",
+                }
+            elif any(kw in title or kw in tags_str for kw in ["ビジネス", "解説", "教育"]):
+                recommendation = {
+                    "style": "simple",
+                    "reason": "ビジネス系・読みやすさ重視",
+                    "confidence": 0.7,
+                    "source": "content_analysis",
+                }
+
+        return {
+            "video_id": video_id,
+            "recommendation": recommendation,
+            "user_feedback_count": len(user_prefs) if user_prefs else 0,
+        }
+
+    except Exception as exc:
+        logger.exception(f"Failed to get subtitle recommendation: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to get subtitle recommendation: {exc}")

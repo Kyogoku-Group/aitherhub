@@ -162,9 +162,28 @@ const SUBTITLE_PRESETS = {
       lineHeight: 1.5,
     },
   },
+  karaoke: {
+    id: 'karaoke',
+    name: 'カラオケ',
+    desc: '喋りに合わせてハイライト',
+    icon: '♪',
+    container: {},
+    text: {
+      color: 'rgba(255,255,255,0.5)',
+      fontSize: 18,
+      fontWeight: 700,
+      textShadow: '0 2px 8px rgba(0,0,0,0.9)',
+      backgroundColor: 'rgba(0,0,0,0.70)',
+      padding: '8px 18px',
+      borderRadius: 10,
+      letterSpacing: 0.5,
+      lineHeight: 1.5,
+    },
+    highlightColor: '#FFE135',
+  },
 };
 
-const SUBTITLE_PRESET_ORDER = ['simple', 'box', 'outline', 'pop', 'gradient'];
+const SUBTITLE_PRESET_ORDER = ['simple', 'box', 'outline', 'pop', 'gradient', 'karaoke'];
 
 // ═══════════════════════════════════════════════════════════════════════════
 const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
@@ -205,6 +224,7 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
   const [subtitleFeedback, setSubtitleFeedback] = useState(null); // 'up' | 'down' | null
   const [feedbackTags, setFeedbackTags] = useState([]);
   const [feedbackSaved, setFeedbackSaved] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const clipDur = trimEnd - trimStart;
 
@@ -341,39 +361,52 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
   }, []);
 
   useEffect(() => {
-    // Priority 1: Real speech transcripts from timeline API (Whisper segments)
-    if (timelineData?.transcripts?.length > 0) {
-      const fromTranscripts = buildCaptionsFromTranscripts(timelineData.transcripts, clip);
-      if (fromTranscripts.length > 0) {
-        console.log(`[Subtitles] Using ${fromTranscripts.length} real transcript segments (source: ${timelineData.transcript_source})`);
-        setCaptions(fromTranscripts);
-        return;
-      }
-    }
-
-    // Priority 2: clip.captions (from generate_clip Whisper)
-    if (clip?.captions && clip.captions.length > 0) {
-      console.log("[Subtitles] Using clip.captions");
-      setCaptions(clip.captions);
-      return;
-    }
-
     if (!videoId || clip?.phase_index == null) return;
 
-    // Priority 3: Fetch from clip status API
+    // Priority 0 (HIGHEST): Fetch saved captions from DB via clip status API
+    // This ensures user-edited/saved captions are always loaded first
     (async () => {
       try {
         const res = await VideoService.getClipStatus(videoId, clip.phase_index);
+        // Restore saved subtitle style & position
+        if (res?.subtitle_style) {
+          setSubtitleStyle(res.subtitle_style);
+          console.log(`[Subtitles] Restored style: ${res.subtitle_style}`);
+        }
+        if (res?.subtitle_position_x != null && res?.subtitle_position_y != null) {
+          setSubtitlePos({ x: res.subtitle_position_x, y: res.subtitle_position_y });
+          console.log(`[Subtitles] Restored position: (${res.subtitle_position_x}, ${res.subtitle_position_y})`);
+        }
         if (res?.captions && res.captions.length > 0) {
-          console.log("[Subtitles] Using getClipStatus captions");
-          setCaptions(res.captions);
+          // Ensure saved captions have a source marker
+          const saved = Array.isArray(res.captions) ? res.captions : [];
+          const withSource = saved.map(c => ({ ...c, source: c.source || 'saved' }));
+          console.log(`[Subtitles] Loaded ${withSource.length} saved captions from DB`);
+          setCaptions(withSource);
           return;
         }
       } catch (e) {
-        console.warn("Failed to fetch clip captions:", e);
+        console.warn("Failed to fetch saved captions:", e);
       }
 
-      // Priority 4: Fallback to audio_text from phases (actual speech, NOT description)
+      // Priority 1: clip.captions (from generate_clip Whisper)
+      if (clip?.captions && clip.captions.length > 0) {
+        console.log("[Subtitles] Using clip.captions");
+        setCaptions(clip.captions);
+        return;
+      }
+
+      // Priority 2: Real speech transcripts from timeline API (Whisper segments)
+      if (timelineData?.transcripts?.length > 0) {
+        const fromTranscripts = buildCaptionsFromTranscripts(timelineData.transcripts, clip);
+        if (fromTranscripts.length > 0) {
+          console.log(`[Subtitles] Using ${fromTranscripts.length} real transcript segments (source: ${timelineData.transcript_source})`);
+          setCaptions(fromTranscripts);
+          return;
+        }
+      }
+
+      // Priority 3: Fallback to audio_text from phases (actual speech, NOT description)
       if (timelineData?.phases?.length > 0) {
         const fallback = buildCaptionsFromAudioText(timelineData.phases, clip);
         if (fallback.length > 0) {
@@ -395,12 +428,12 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
     // Wait for timelineData to load first
     if (timelineData === null) return;
 
-    // Check if we already have Whisper-sourced captions
-    const hasWhisperCaptions = captions.some(
-      (c) => c.source === "whisper" || c.source === "transcript"
+    // Check if we already have good captions (saved, whisper, or transcript)
+    const hasGoodCaptions = captions.some(
+      (c) => c.source === "whisper" || c.source === "transcript" || c.source === "saved"
     );
-    if (hasWhisperCaptions) {
-      console.log("[AutoTranscribe] Already have Whisper captions, skipping");
+    if (hasGoodCaptions) {
+      console.log("[AutoTranscribe] Already have good captions (source: " + captions[0]?.source + "), skipping");
       return;
     }
 
@@ -517,7 +550,10 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
     setSavingCaps(true);
     setStatus(null);
     try {
-      await VideoService.updateClipCaptions(videoId, clip.clip_id, captions);
+      // Mark all captions as saved so they get priority on next load
+      const capsToSave = captions.map(c => ({ ...c, source: 'saved' }));
+      await VideoService.updateClipCaptions(videoId, clip.clip_id, capsToSave);
+      setCaptions(capsToSave);
       setStatus({ ok: true, msg: "字幕を保存しました" });
     } catch (e) {
       setStatus({ ok: false, msg: `字幕保存失敗: ${e.message}` });
@@ -546,13 +582,17 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
           end: s.end,
           text: s.text,
           source: "whisper",
+          // Include word-level timestamps for karaoke-style highlighting
+          ...(s.words && s.words.length > 0 ? { words: s.words } : {}),
         }));
         setCaptions(newCaps);
         setStatus({ ok: true, msg: `${newCaps.length}件の字幕を生成しました` });
-        // Auto-save generated subtitles so they persist
+        // Auto-save generated subtitles so they persist on next load
         if (clip?.clip_id) {
           try {
-            await VideoService.updateClipCaptions(videoId, clip.clip_id, newCaps);
+            const capsToSave = newCaps.map(c => ({ ...c, source: 'saved' }));
+            await VideoService.updateClipCaptions(videoId, clip.clip_id, capsToSave);
+            setCaptions(capsToSave);
             console.log("[Subtitles] Auto-saved generated subtitles");
           } catch (saveErr) {
             console.warn("[Subtitles] Auto-save failed:", saveErr);
@@ -592,29 +632,109 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
     });
   };
 
-  // ─── AI Recommended style based on video genre ───
-  const getAiRecommendedStyle = () => {
-    // Determine recommendation based on video metadata
+  // ─── Karaoke style: word-by-word highlight synced to playback ───
+  const renderKaraokeText = (caption) => {
+    if (!caption) return null;
+    const preset = SUBTITLE_PRESETS.karaoke;
+    const highlightColor = preset.highlightColor || '#FFE135';
+    const dimColor = preset.text.color || 'rgba(255,255,255,0.5)';
+    const t = currentTime;
+
+    // If word-level timestamps are available, use them
+    if (caption.words && caption.words.length > 0) {
+      return caption.words.map((w, i) => {
+        const wStart = toLocalTime(w.start || 0);
+        const wEnd = toLocalTime(w.end || 0);
+        const isActive = t >= wStart && t <= wEnd;
+        const isPast = t > wEnd;
+        return (
+          <span
+            key={i}
+            style={{
+              color: isActive ? highlightColor : isPast ? '#fff' : dimColor,
+              fontWeight: isActive ? 900 : 700,
+              fontSize: isActive ? `${(preset.text.fontSize || 18) * 1.15}px` : `${preset.text.fontSize || 18}px`,
+              transition: 'color 0.15s ease, font-size 0.15s ease',
+              display: 'inline',
+            }}
+          >
+            {w.word}
+          </span>
+        );
+      });
+    }
+
+    // Fallback: estimate word timing from segment start/end
+    const chars = [...caption.text];
+    const capStart = toLocalTime(caption.start || 0);
+    const capEnd = toLocalTime(caption.end || (caption.start + 5));
+    const capDuration = capEnd - capStart;
+    if (capDuration <= 0) return caption.text;
+
+    const progress = Math.max(0, Math.min(1, (t - capStart) / capDuration));
+    const highlightIdx = Math.floor(progress * chars.length);
+
+    return chars.map((ch, i) => (
+      <span
+        key={i}
+        style={{
+          color: i <= highlightIdx ? highlightColor : dimColor,
+          fontWeight: i === highlightIdx ? 900 : 700,
+          transition: 'color 0.1s ease',
+          display: 'inline',
+        }}
+      >
+        {ch}
+      </span>
+    ));
+  };
+
+  // ─── AI Recommended style based on video genre + user feedback history ───
+  const getAiRecommendedStyleLocal = () => {
+    // Local fallback: determine recommendation based on video metadata
     const tags = videoData?.tags || [];
     const title = videoData?.title || clip?.description || '';
     const titleLower = title.toLowerCase();
 
     if (tags.some(t => /美容|コスメ|スキンケア|beauty/i.test(t)) || /美容|コスメ/i.test(titleLower)) {
-      return { style: 'gradient', reason: '美容系コンテンツに最適' };
+      return { style: 'gradient', reason: '美容系コンテンツに最適', source: 'local' };
     }
     if (tags.some(t => /エンタメ|お笑い|バラエティ|funny|viral/i.test(t)) || /バズ|爆笑/i.test(titleLower)) {
-      return { style: 'pop', reason: 'エンタメ系に最適・インパクト大' };
+      return { style: 'pop', reason: 'エンタメ系に最適・インパクト大', source: 'local' };
     }
     if (tags.some(t => /ビジネス|解説|教育|business/i.test(t)) || /解説|まとめ/i.test(titleLower)) {
-      return { style: 'simple', reason: 'ビジネス系・読みやすさ重視' };
+      return { style: 'simple', reason: 'ビジネス系・読みやすさ重視', source: 'local' };
     }
     if (clip?.ai_score && clip.ai_score >= 80) {
-      return { style: 'outline', reason: '高スコアクリップ・目立たせるスタイル' };
+      return { style: 'outline', reason: '高スコアクリップ・目立たせるスタイル', source: 'local' };
     }
-    return { style: 'box', reason: '万能型・どんな動画にも合う' };
+    return { style: 'box', reason: '万能型・どんな動画にも合う', source: 'local' };
   };
 
-  const aiRecommendation = useMemo(() => getAiRecommendedStyle(), [videoData, clip]);
+  const [aiRecommendation, setAiRecommendation] = useState(() => getAiRecommendedStyleLocal());
+
+  // Fetch personalized recommendation from backend (uses feedback history)
+  useEffect(() => {
+    if (!videoId) return;
+    (async () => {
+      try {
+        const res = await VideoService.getSubtitleRecommendation(videoId);
+        if (res?.recommendation) {
+          setAiRecommendation({
+            style: res.recommendation.style,
+            reason: res.recommendation.reason,
+            source: res.recommendation.source || 'api',
+            confidence: res.recommendation.confidence,
+            feedbackCount: res.user_feedback_count || 0,
+          });
+          console.log(`[AI Recommend] From API: ${res.recommendation.style} (${res.recommendation.source}, confidence=${res.recommendation.confidence})`);
+        }
+      } catch (e) {
+        console.warn('[AI Recommend] API failed, using local fallback:', e);
+        // Keep local fallback
+      }
+    })();
+  }, [videoId]);
 
   // ─── Feedback tags ───
   const FEEDBACK_TAGS = [
@@ -631,18 +751,25 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
 
   const saveFeedback = async () => {
     try {
-      // Save feedback to backend (future: dedicated API)
-      console.log('[SubtitleFeedback]', {
-        videoId,
-        clipId: clip?.clip_id,
+      if (!clip?.clip_id) throw new Error('clip_id not found');
+      // Save feedback to backend via API
+      await VideoService.saveSubtitleFeedback(videoId, clip.clip_id, {
         style: subtitleStyle,
         vote: subtitleFeedback,
         tags: feedbackTags,
         position: subtitlePos,
+        ai_recommended_style: aiRecommendation?.style || null,
+      });
+      // Also persist the style & position to the clip
+      await VideoService.saveSubtitleStyle(videoId, clip.clip_id, {
+        style: subtitleStyle,
+        position_x: subtitlePos.x,
+        position_y: subtitlePos.y,
       });
       setFeedbackSaved(true);
       setStatus({ ok: true, msg: 'フィードバックを保存しました' });
     } catch (e) {
+      console.error('[SubtitleFeedback] Save failed:', e);
       setStatus({ ok: false, msg: `フィードバック保存失敗: ${e.message}` });
     }
   };
@@ -696,6 +823,52 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
           </span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {clip.clip_url && captions.length > 0 && (
+            <button
+              onClick={async () => {
+                if (exporting) return;
+                setExporting(true);
+                setStatus({ ok: true, msg: '字幕付きMP4を生成中...' });
+                try {
+                  const res = await VideoService.exportSubtitledClip(videoId, {
+                    clip_url: clip.clip_url,
+                    captions: captions.map(c => ({
+                      start: c.start,
+                      end: c.end,
+                      text: c.text,
+                      ...(c.words ? { words: c.words } : {}),
+                    })),
+                    style: subtitleStyle,
+                    position_x: subtitlePos.x,
+                    position_y: subtitlePos.y,
+                    time_start: clip.time_start || origStart,
+                  });
+                  if (res?.download_url) {
+                    window.open(res.download_url, '_blank');
+                    setStatus({ ok: true, msg: '字幕付きMP4をダウンロード中...' });
+                  }
+                } catch (e) {
+                  setStatus({ ok: false, msg: `エクスポート失敗: ${e.message}` });
+                } finally {
+                  setExporting(false);
+                }
+              }}
+              disabled={exporting}
+              style={{
+                padding: "4px 14px",
+                backgroundColor: exporting ? C.surfaceLight : C.green,
+                color: "#fff",
+                borderRadius: 6,
+                border: "none",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: exporting ? 'wait' : 'pointer',
+                opacity: exporting ? 0.7 : 1,
+              }}
+            >
+              {exporting ? '生成中...' : '字幕付き Export'}
+            </button>
+          )}
           {clip.clip_url && (
             <a
               href={clip.clip_url}
@@ -877,7 +1050,11 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
                       } : {}),
                     }}
                   >
-                    {subtitleStyle === 'pop' ? renderPopText(currentCaption.text) : currentCaption.text}
+                    {subtitleStyle === 'karaoke'
+                      ? renderKaraokeText(currentCaption)
+                      : subtitleStyle === 'pop'
+                        ? renderPopText(currentCaption.text)
+                        : currentCaption.text}
                   </span>
                 </div>
               );
@@ -1095,9 +1272,26 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
                 >
                   <span style={{ fontSize: 14 }}>\u2728</span>
                   <div style={{ flex: 1 }}>
-                    <div style={{ color: C.accent, fontSize: 11, fontWeight: 700 }}>AIおすすめ</div>
+                    <div style={{ color: C.accent, fontSize: 11, fontWeight: 700 }}>
+                      AIおすすめ
+                      {aiRecommendation.source === 'user_feedback' && (
+                        <span style={{ marginLeft: 6, color: C.green, fontSize: 9, fontWeight: 500 }}>
+                          パーソナライズ済み
+                        </span>
+                      )}
+                      {aiRecommendation.confidence && (
+                        <span style={{ marginLeft: 4, color: C.textMuted, fontSize: 9, fontWeight: 400 }}>
+                          ({Math.round(aiRecommendation.confidence * 100)}%)
+                        </span>
+                      )}
+                    </div>
                     <div style={{ color: C.textMuted, fontSize: 10 }}>
                       {SUBTITLE_PRESETS[aiRecommendation.style]?.name} — {aiRecommendation.reason}
+                      {aiRecommendation.feedbackCount > 0 && (
+                        <span style={{ marginLeft: 4, color: C.blue, fontSize: 9 }}>
+                          ({aiRecommendation.feedbackCount}件のフィードバックに基づく)
+                        </span>
+                      )}
                     </div>
                   </div>
                   {subtitleStyle === aiRecommendation.style && (
@@ -1108,7 +1302,7 @@ const ClipEditorV2 = ({ videoId, clip, videoData, onClose, onClipUpdated }) => {
                 {/* スタイルプリセットグリッド */}
                 <div style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(5, 1fr)',
+                  gridTemplateColumns: 'repeat(6, 1fr)',
                   gap: 6,
                   marginBottom: 14,
                 }}>
