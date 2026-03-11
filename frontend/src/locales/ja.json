@@ -13,7 +13,7 @@
   "statusNew": "アップロード待ち",
   "statusUploading": "アップロード中...",
   "statusUploaded": "アップロード完了",
-  "statusCompress": "動画を1080pに圧縮中...",
+  "statusCompress": "解析準備中（ダウンロード・前処理）...",
   "statusStep0": "フレーム抽出中...",
   "statusStep1": "フェーズ検出中...",
   "statusStep2": "メトリクス抽出中...",

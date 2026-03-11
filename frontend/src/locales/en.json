@@ -13,7 +13,7 @@
   "statusNew": "Waiting for upload",
   "statusUploading": "Uploading...",
   "statusUploaded": "Upload completed",
-  "statusCompress": "Compressing video to 1080p...",
+  "statusCompress": "Preparing analysis (download & preprocessing)...",
   "statusStep0": "Extracting frames...",
   "statusStep1": "Detecting phases...",
   "statusStep2": "Extracting metrics...",

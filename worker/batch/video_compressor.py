@@ -353,13 +353,21 @@ def compress_to_1080p(
         ]
 
     try:
+        COMPRESS_TIMEOUT_SECONDS = 3 * 3600  # 3 hours max for compression
         logger.info("[COMPRESS] FFmpeg command: %s", " ".join(cmd))
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            # No timeout - compression of large files can take hours
-        )
+        logger.info("[COMPRESS] Timeout set to %d seconds (%.1f hours)", COMPRESS_TIMEOUT_SECONDS, COMPRESS_TIMEOUT_SECONDS / 3600)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=COMPRESS_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("[COMPRESS] FFmpeg timed out after %d seconds!", COMPRESS_TIMEOUT_SECONDS)
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            return None
 
         if result.returncode != 0:
             logger.error("[COMPRESS] FFmpeg failed with code %d", result.returncode)

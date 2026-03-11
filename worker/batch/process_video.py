@@ -546,6 +546,15 @@ def main():
                     "Proceeding with processing.", video_id, pre_user_id,
                 )
 
+        # ── Early status update: mark that worker has started processing ──
+        # This prevents the UI from showing "uploaded" (= 圧縮中) forever
+        # if the worker crashes during download or pre-flight.
+        try:
+            update_video_status_sync(video_id, VideoStatus.STEP_COMPRESS_1080P)
+            logger.info("[STATUS] Early status update → STEP_COMPRESS_1080P (worker started)")
+        except Exception as e:
+            logger.warning("[STATUS] Failed early status update: %s", e)
+
         video_path, video_id = _resolve_inputs(args)
 
         # --- PRE-FLIGHT: Clean old files and check disk space ---
@@ -1731,8 +1740,15 @@ def main():
 
 
     except Exception as exc:
+        # Set error status AND error_message so UI can display it
+        _err_msg = str(exc)[:500]
+        try:
+            from db_ops import update_video_error_message_sync
+            update_video_error_message_sync(video_id, _err_msg)
+        except Exception:
+            pass
         update_video_status_sync(video_id, VideoStatus.ERROR)
-        logger.exception("Video processing failed")
+        logger.exception("Video processing failed: %s", _err_msg)
 
         # Record error log to DB
         try:

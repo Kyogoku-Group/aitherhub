@@ -2169,3 +2169,21 @@ async def get_video_error_logs(video_id: str, limit: int = 50):
 def get_video_error_logs_sync(video_id: str, limit: int = 50):
     loop = get_event_loop()
     return loop.run_until_complete(get_video_error_logs(video_id, limit))
+
+
+async def update_video_error_message(video_id: str, error_message: str):
+    """Update the error_message column on the videos table."""
+    sql = text("""
+        UPDATE videos
+        SET error_message = :msg,
+            updated_at = NOW()
+        WHERE id = :vid
+    """)
+    async with AsyncSessionLocal() as session:
+        await session.execute(sql, {"vid": video_id, "msg": error_message})
+        await session.commit()
+
+
+def update_video_error_message_sync(video_id: str, error_message: str):
+    loop = get_event_loop()
+    loop.run_until_complete(update_video_error_message(video_id, error_message))

@@ -21,10 +21,11 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# ── Configuration ─────────────────────────────────────────────────────
-CHECK_INTERVAL_MINUTES = 10       # How often to check for stuck videos
-STUCK_THRESHOLD_MINUTES = 30      # Minutes without update → considered stuck
-MAX_AUTO_RETRIES = 3              # Max auto-requeue attempts per video
+# ── Configuration ─────────────────────────────────────────────────────────────
+CHECK_INTERVAL_MINUTES = 5        # How often to check for stuck videos (was 10)
+STUCK_THRESHOLD_MINUTES = 20      # Minutes without update → considered stuck (was 30)
+MAX_AUTO_RETRIES = 5              # Max auto-requeue attempts per video (was 3)
+WORKER_GUARD_HOURS = 1            # Hours since worker_claimed_at to consider stale (was 3)
 
 _monitor_task = None
 
@@ -49,10 +50,9 @@ async def _check_and_requeue_stuck_videos():
                 # - updated_at is older than threshold
                 # - dequeue_count (auto-retry counter) < MAX_AUTO_RETRIES
                 # worker_claimed_at guard: if a worker claimed the job
-                # within the last 3 hours, the job is likely still running
-                # (e.g. STEP_14 split wait can take up to 2h).
+                # within the last WORKER_GUARD_HOURS, the job is likely still running.
                 # Only requeue if BOTH updated_at AND worker_claimed_at are stale.
-                worker_guard = datetime.now(timezone.utc) - timedelta(hours=3)
+                worker_guard = datetime.now(timezone.utc) - timedelta(hours=WORKER_GUARD_HOURS)
 
                 sql = text("""
                     SELECT v.id, v.original_filename, v.status, v.user_id,

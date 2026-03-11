@@ -61,6 +61,22 @@ def update_compressed_blob_url(video_id: str, compressed_blob_url: str):
         logger.error("Failed to update DB with compressed_blob_url: %s", e)
 
 
+def _record_compress_error(video_id: str, error_code: str, error_message: str):
+    """Best-effort: record compression error to video_error_logs."""
+    try:
+        from db_ops import insert_video_error_log_sync
+        insert_video_error_log_sync(
+            video_id=video_id,
+            error_code=error_code,
+            error_step="BACKGROUND_COMPRESSION",
+            error_message=error_message[:2000],
+            error_detail=None,
+            source="compress_bg",
+        )
+    except Exception as e:
+        logger.warning("Failed to record compress error log: %s", e)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Background video compression")
     parser.add_argument("--video-path", required=True, help="Local path to video file")
@@ -71,6 +87,13 @@ def main():
     video_path = args.video_path
     video_id = args.video_id
     blob_url = args.blob_url
+
+    # Initialize DB connection for error logging
+    try:
+        from db_ops import init_db_sync
+        init_db_sync()
+    except Exception as e:
+        logger.warning("Failed to init DB for compress_bg: %s", e)
 
     logger.info("Starting background compression for video: %s", video_id)
     logger.info("Video path: %s", video_path)
@@ -99,6 +122,7 @@ def main():
 
     if compressed_path is None:
         logger.error("Compression failed")
+        _record_compress_error(video_id, "COMPRESS_FAILED", "compress_to_1080p returned None")
         sys.exit(1)
 
     logger.info("Compression complete: %s", compressed_path)

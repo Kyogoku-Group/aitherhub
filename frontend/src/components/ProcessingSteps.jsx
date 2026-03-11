@@ -6,7 +6,9 @@ const STALL_DETECT_MINUTES = 10;  // Minutes without progress change → show st
 const STALL_DETECT_MS = STALL_DETECT_MINUTES * 60 * 1000;
 
 const normalizeProcessingStatus = (status) => {
-  if (status === 'uploaded') {
+  if (status === 'uploaded' || status === 'QUEUED') {
+    // 'uploaded' means enqueued but worker hasn't started yet.
+    // Show as first analysis step (解析準備中) instead of misleading "圧縮中".
     return 'STEP_COMPRESS_1080P';
   }
   return status;
@@ -363,8 +365,9 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
     setIsRetrying(true);
     try {
       const result = await VideoService.retryAnalysis(videoId);
-      // Use the resume status from API response instead of always resetting to STEP_COMPRESS
-      const resumeStatus = result?.new_status || 'STEP_COMPRESS_1080P';
+      // Use the resume status from API response.
+      // Fallback to STEP_COMPRESS_1080P which now shows as "解析準備中" (not "圧縮中")
+      const resumeStatus = normalizeProcessingStatus(result?.new_status || 'uploaded');
       setIsStalled(false);
       setErrorMessage(null);
       setCurrentStatus(resumeStatus);
@@ -721,7 +724,7 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
   const queueStep = { key: 'QUEUE_WAITING', label: getQueueStatusLabel() };
 
   const analysisSteps = [
-    { key: 'STEP_COMPRESS_1080P', label: window.__t('statusCompress') || '動画を解析準備中...' },
+    { key: 'STEP_COMPRESS_1080P', label: window.__t('statusCompress') || '解析準備中（ダウンロード・前処理）...' },
     { key: 'STEP_0_EXTRACT_FRAMES', label: window.__t('statusStep0') || 'フレーム抽出中...' },
     { key: 'STEP_1_DETECT_PHASES', label: window.__t('statusStep1') || 'フェーズ検出中...' },
     { key: 'STEP_2_EXTRACT_METRICS', label: window.__t('statusStep2') || 'メトリクス抽出中...' },
