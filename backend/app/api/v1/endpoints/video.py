@@ -37,13 +37,16 @@ router = APIRouter(
 video_service = VideoService()
 
 
+import os as _os
+
+_BLOB_HOST = _os.getenv("AZURE_BLOB_HOST", "https://aitherhub.blob.core.windows.net")
+_CDN_HOST = _os.getenv("CDN_HOST", "https://cdn.aitherhub.com")
+
+
 def _replace_blob_url_to_cdn(url: str) -> str:
     """Replace blob storage domain with CDN domain if applicable."""
     if url and isinstance(url, str):
-        return url.replace(
-            "https://aitherhub.blob.core.windows.net",
-            "https://cdn.aitherhub.com"
-        )
+        return url.replace(_BLOB_HOST, _CDN_HOST)
     return url
 
 
