@@ -1101,8 +1101,7 @@ def main():
                 }
 
                 # DBに保存（product_namesはJSON配列文字列として保存）
-                import json as _json
-                product_names_json = _json.dumps(phase_product_names, ensure_ascii=False) if phase_product_names else None
+                product_names_json = json.dumps(phase_product_names, ensure_ascii=False) if phase_product_names else None
                 try:
                     update_video_phase_csv_metrics_sync(
                         video_id=str(video_id),
@@ -1243,11 +1242,10 @@ def main():
                 tags = p.get("sales_tags")
                 if tags and isinstance(tags, list) and len(tags) > 0:
                     try:
-                        import json as _json
-                        update_video_phase_sales_tags_sync(
+                                update_video_phase_sales_tags_sync(
                             video_id=video_id,
                             phase_index=p["phase_index"],
-                            sales_tags_json=_json.dumps(tags),
+                            sales_tags_json=json.dumps(tags),
                         )
                         tags_count += 1
                     except Exception as e:
@@ -1269,7 +1267,6 @@ def main():
                 )
 
                 # Persist audio features to DB
-                import json as _json
                 af_count = 0
                 for p in phase_units:
                     af = p.get("audio_features")
@@ -1278,7 +1275,7 @@ def main():
                             update_video_phase_audio_features_sync(
                                 video_id=video_id,
                                 phase_index=p["phase_index"],
-                                audio_features_json=_json.dumps(af),
+                                audio_features_json=json.dumps(af),
                             )
                             af_count += 1
                         except Exception as e:

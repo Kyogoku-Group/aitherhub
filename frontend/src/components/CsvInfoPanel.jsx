@@ -23,8 +23,8 @@ export default function CsvInfoPanel({ videoData, onReplace }) {
     setLoading(true);
     (async () => {
       try {
-        const api = new BaseApiService();
-        const res = await api.get(`/video/${videoData.id}/excel-info`);
+        const api = new BaseApiService(import.meta.env.VITE_API_BASE_URL || "");
+        const res = await api.get(`/api/v1/videos/${videoData.id}/excel-info`);
         if (!cancelled) setExcelInfo(res);
       } catch (err) {
         console.warn("[CsvInfoPanel] Failed to load excel info:", err);

@@ -22,7 +22,7 @@ export default function CsvReplaceModal({ videoData, onClose, onComplete }) {
   const productInputRef = useRef(null);
   const trendInputRef = useRef(null);
 
-  const api = new BaseApiService();
+  const api = new BaseApiService(import.meta.env.VITE_API_BASE_URL || "");
 
   // ファイル選択ハンドラー
   const handleProductSelect = (e) => {
@@ -110,7 +110,7 @@ export default function CsvReplaceModal({ videoData, onClose, onComplete }) {
       // 1. Excel アップロードURL生成
       if (productFile || trendFile) {
         setUploadProgress("アップロードURLを生成中...");
-        const urlRes = await api.post("/videos/generate-excel-upload-url", {
+        const urlRes = await api.post("/api/v1/videos/generate-excel-upload-url", {
           email,
           video_id: videoId,
           product_filename: productFile?.name || "placeholder.xlsx",
@@ -134,7 +134,7 @@ export default function CsvReplaceModal({ videoData, onClose, onComplete }) {
 
       // 4. replace-excel APIを呼び出し
       setUploadProgress("データを差し替え中...");
-      const replaceRes = await api.put(`/video/${videoId}/replace-excel`, {
+      const replaceRes = await api.put(`/api/v1/videos/${videoId}/replace-excel`, {
         excel_product_blob_url: productBlobUrl,
         excel_trend_blob_url: trendBlobUrl,
         reprocess: true,
@@ -145,7 +145,7 @@ export default function CsvReplaceModal({ videoData, onClose, onComplete }) {
 
       // バリデーションログを送信
       try {
-        await api.post("/admin/csv-validation-log", {
+        await api.post("/api/v1/admin/csv-validation-log", {
           video_id: videoId,
           video_filename: videoData?.original_filename || "",
           action: "replace",
@@ -166,14 +166,14 @@ export default function CsvReplaceModal({ videoData, onClose, onComplete }) {
         const validationStatus = statusMap[verdict] || "unknown";
 
         if (trendBlobUrl) {
-          await api.post(`/video/${videoId}/update-validation-status`, {
+          await api.post(`/api/v1/videos/${videoId}/update-validation-status`, {
             asset_type: "trend_csv",
             validation_status: validationStatus,
             validation_result: validationResult || null,
           });
         }
         if (productBlobUrl) {
-          await api.post(`/video/${videoId}/update-validation-status`, {
+          await api.post(`/api/v1/videos/${videoId}/update-validation-status`, {
             asset_type: "product_csv",
             validation_status: validationStatus,
             validation_result: validationResult || null,

@@ -1594,24 +1594,27 @@ async def log_csv_validation(
     try:
         body = await request.json()
 
-        # テーブル自動作成
+        # テーブル自動作成 (PostgreSQL互換)
         create_sql = text("""
             CREATE TABLE IF NOT EXISTS csv_validation_logs (
-                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                id BIGSERIAL PRIMARY KEY,
                 verdict VARCHAR(20),
                 decision VARCHAR(20),
                 video_filename VARCHAR(500),
                 trend_filename VARCHAR(500),
                 product_filename VARCHAR(500),
-                checks JSON,
+                checks JSONB,
                 user_email VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_csv_val_created (created_at),
-                INDEX idx_csv_val_verdict (verdict),
-                INDEX idx_csv_val_decision (decision)
+                created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
         await db.execute(create_sql)
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_csv_val_created ON csv_validation_logs (created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_csv_val_verdict ON csv_validation_logs (verdict)",
+            "CREATE INDEX IF NOT EXISTS idx_csv_val_decision ON csv_validation_logs (decision)",
+        ]:
+            await db.execute(text(idx_sql))
 
         insert_sql = text("""
             INSERT INTO csv_validation_logs
@@ -1650,24 +1653,27 @@ async def get_csv_validation_logs(
     CSV Validation ログ一覧を取得する（Admin用）。
     """
     try:
-        # テーブル自動作成
+        # テーブル自動作成 (PostgreSQL互換)
         create_sql = text("""
             CREATE TABLE IF NOT EXISTS csv_validation_logs (
-                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                id BIGSERIAL PRIMARY KEY,
                 verdict VARCHAR(20),
                 decision VARCHAR(20),
                 video_filename VARCHAR(500),
                 trend_filename VARCHAR(500),
                 product_filename VARCHAR(500),
-                checks JSON,
+                checks JSONB,
                 user_email VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_csv_val_created (created_at),
-                INDEX idx_csv_val_verdict (verdict),
-                INDEX idx_csv_val_decision (decision)
+                created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
         await db.execute(create_sql)
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_csv_val_created ON csv_validation_logs (created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_csv_val_verdict ON csv_validation_logs (verdict)",
+            "CREATE INDEX IF NOT EXISTS idx_csv_val_decision ON csv_validation_logs (decision)",
+        ]:
+            await db.execute(text(idx_sql))
 
         where_clauses = ["1=1"]
         params = {"limit_val": limit, "offset_val": offset}

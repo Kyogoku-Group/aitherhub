@@ -23,13 +23,13 @@ export default function CsvAssetPanel({ videoData, onReplace, onRefresh }) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [revalidating, setRevalidating] = useState(false);
 
-  const api = new BaseApiService();
+  const api = new BaseApiService(import.meta.env.VITE_API_BASE_URL || "");
 
   const loadExcelInfo = useCallback(async () => {
     if (!videoData?.id) return;
     setLoading(true);
     try {
-      const res = await api.get(`/video/${videoData.id}/excel-info`);
+      const res = await api.get(`/api/v1/videos/${videoData.id}/excel-info`);
       setExcelInfo(res);
     } catch (err) {
       console.warn("[CsvAssetPanel] Failed to load excel info:", err);
@@ -52,7 +52,7 @@ export default function CsvAssetPanel({ videoData, onReplace, onRefresh }) {
     setPreviewLoading(true);
     setPreviewData(null);
     try {
-      const res = await api.get(`/video/${videoData.id}/csv-preview?asset_type=${assetType}&max_rows=10`);
+      const res = await api.get(`/api/v1/videos/${videoData.id}/csv-preview?asset_type=${assetType}&max_rows=10`);
       setPreviewData(res);
     } catch (err) {
       console.warn("[CsvAssetPanel] Failed to load preview:", err);
@@ -71,7 +71,7 @@ export default function CsvAssetPanel({ videoData, onReplace, onRefresh }) {
     setShowHistory(true);
     setHistoryLoading(true);
     try {
-      const res = await api.get(`/video/${videoData.id}/asset-history`);
+      const res = await api.get(`/api/v1/videos/${videoData.id}/asset-history`);
       setHistoryData(res);
     } catch (err) {
       console.warn("[CsvAssetPanel] Failed to load history:", err);

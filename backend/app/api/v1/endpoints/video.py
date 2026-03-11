@@ -3958,25 +3958,29 @@ async def replace_excel(
             # テーブル作成（初回のみ）
             create_assets_sql = text("""
                 CREATE TABLE IF NOT EXISTS video_upload_assets (
-                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    id BIGSERIAL PRIMARY KEY,
                     video_id VARCHAR(100) NOT NULL,
-                    asset_type ENUM('video', 'trend_csv', 'product_csv') NOT NULL,
+                    asset_type VARCHAR(20) NOT NULL CHECK (asset_type IN ('video', 'trend_csv', 'product_csv')),
                     original_filename VARCHAR(500),
                     blob_url TEXT,
                     file_size BIGINT DEFAULT 0,
-                    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    uploaded_at TIMESTAMPTZ DEFAULT NOW(),
                     uploaded_by INT,
-                    is_active TINYINT(1) DEFAULT 1,
+                    is_active BOOLEAN DEFAULT TRUE,
                     version INT DEFAULT 1,
                     validation_status VARCHAR(20) DEFAULT 'unknown',
-                    validation_result JSON,
-                    replaced_by_id BIGINT DEFAULT NULL,
-                    INDEX idx_vua_video (video_id),
-                    INDEX idx_vua_video_type (video_id, asset_type),
-                    INDEX idx_vua_active (video_id, asset_type, is_active)
+                    validation_result JSONB,
+                    replaced_by_id BIGINT DEFAULT NULL
                 )
             """)
             await db.execute(create_assets_sql)
+            # Create indexes separately (PostgreSQL doesn't support inline INDEX in CREATE TABLE)
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS idx_vua_video ON video_upload_assets (video_id)",
+                "CREATE INDEX IF NOT EXISTS idx_vua_video_type ON video_upload_assets (video_id, asset_type)",
+                "CREATE INDEX IF NOT EXISTS idx_vua_active ON video_upload_assets (video_id, asset_type, is_active)",
+            ]:
+                await db.execute(text(idx_sql))
 
             # 旧アセットを非アクティブにして、新アセットを登録
             if excel_product_blob_url:
@@ -3992,8 +3996,8 @@ async def replace_excel(
                 # 旧アセットを非アクティブに
                 await db.execute(text("""
                     UPDATE video_upload_assets
-                    SET is_active = 0
-                    WHERE video_id = :video_id AND asset_type = 'product_csv' AND is_active = 1
+                    SET is_active = FALSE
+                    WHERE video_id = :video_id AND asset_type = 'product_csv' AND is_active = TRUE
                 """), {"video_id": video_id})
 
                 # 新アセットを登録
@@ -4004,7 +4008,7 @@ async def replace_excel(
                          uploaded_by, version, is_active)
                     VALUES
                         (:video_id, 'product_csv', :filename, :blob_url,
-                         :user_id, :version, 1)
+                         :user_id, :version, TRUE)
                 """), {
                     "video_id": video_id,
                     "filename": product_fn,
@@ -4024,8 +4028,8 @@ async def replace_excel(
 
                 await db.execute(text("""
                     UPDATE video_upload_assets
-                    SET is_active = 0
-                    WHERE video_id = :video_id AND asset_type = 'trend_csv' AND is_active = 1
+                    SET is_active = FALSE
+                    WHERE video_id = :video_id AND asset_type = 'trend_csv' AND is_active = TRUE
                 """), {"video_id": video_id})
 
                 trend_fn = excel_trend_blob_url.split("?")[0].split("/")[-1] if excel_trend_blob_url else None
@@ -4035,7 +4039,7 @@ async def replace_excel(
                          uploaded_by, version, is_active)
                     VALUES
                         (:video_id, 'trend_csv', :filename, :blob_url,
-                         :user_id, :version, 1)
+                         :user_id, :version, TRUE)
                 """), {
                     "video_id": video_id,
                     "filename": trend_fn,
@@ -4053,7 +4057,7 @@ async def replace_excel(
         try:
             create_log_sql = text("""
                 CREATE TABLE IF NOT EXISTS excel_replace_logs (
-                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    id BIGSERIAL PRIMARY KEY,
                     video_id VARCHAR(100),
                     user_id INT,
                     old_product_url TEXT,
@@ -4061,12 +4065,15 @@ async def replace_excel(
                     new_product_url TEXT,
                     new_trend_url TEXT,
                     reprocess_status VARCHAR(50),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    INDEX idx_excel_replace_video (video_id),
-                    INDEX idx_excel_replace_created (created_at)
+                    created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
             await db.execute(create_log_sql)
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS idx_excel_replace_video ON excel_replace_logs (video_id)",
+                "CREATE INDEX IF NOT EXISTS idx_excel_replace_created ON excel_replace_logs (created_at)",
+            ]:
+                await db.execute(text(idx_sql))
 
             insert_log_sql = text("""
                 INSERT INTO excel_replace_logs
@@ -4150,7 +4157,7 @@ async def get_excel_info(
                 SELECT id, asset_type, original_filename, blob_url, file_size,
                        uploaded_at, uploaded_by, version, validation_status, validation_result
                 FROM video_upload_assets
-                WHERE video_id = :video_id AND is_active = 1
+                WHERE video_id = :video_id AND is_active = TRUE
                 ORDER BY asset_type
             """)
             active_result = await db.execute(active_sql, {"video_id": video_id})
@@ -4446,7 +4453,7 @@ async def update_validation_status(
                 validation_result = :result
             WHERE video_id = :video_id
               AND asset_type = :asset_type
-              AND is_active = 1
+              AND is_active = TRUE
         """)
         await db.execute(update_sql, {
             "video_id": video_id,
