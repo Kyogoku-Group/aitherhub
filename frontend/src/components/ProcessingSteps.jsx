@@ -686,7 +686,7 @@ function ProcessingSteps({ videoId, initialStatus, videoTitle, onProcessingCompl
   const queueStep = { key: 'QUEUE_WAITING', label: getQueueStatusLabel() };
 
   const analysisSteps = [
-    { key: 'STEP_COMPRESS_1080P', label: window.__t('statusCompress') || '動画圧縮中...' },
+    { key: 'STEP_COMPRESS_1080P', label: window.__t('statusCompress') || '動画を解析準備中...' },
     { key: 'STEP_0_EXTRACT_FRAMES', label: window.__t('statusStep0') || 'フレーム抽出中...' },
     { key: 'STEP_1_DETECT_PHASES', label: window.__t('statusStep1') || 'フェーズ検出中...' },
     { key: 'STEP_2_EXTRACT_METRICS', label: window.__t('statusStep2') || 'メトリクス抽出中...' },

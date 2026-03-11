@@ -2,7 +2,7 @@
 Background task that periodically detects stuck videos and auto-requeues them.
 
 A video is considered "stuck" when:
-  - Its status is QUEUED or STEP_* (processing)
+  - Its status is 'uploaded', QUEUED, or STEP_* (processing)
   - Its `updated_at` has not changed for more than STUCK_THRESHOLD_MINUTES
 
 The monitor runs every CHECK_INTERVAL_MINUTES and requeues stuck videos
@@ -44,7 +44,8 @@ async def _check_and_requeue_stuck_videos():
                 threshold = datetime.now(timezone.utc) - timedelta(minutes=STUCK_THRESHOLD_MINUTES)
 
                 # Find videos that are stuck:
-                # - Status is QUEUED or starts with STEP_
+                # - Status is 'uploaded' (enqueued but worker never started),
+                #   QUEUED, or starts with STEP_
                 # - updated_at is older than threshold
                 # - dequeue_count (auto-retry counter) < MAX_AUTO_RETRIES
                 sql = text("""
@@ -53,7 +54,8 @@ async def _check_and_requeue_stuck_videos():
                            u.email as user_email
                     FROM videos v
                     LEFT JOIN users u ON v.user_id = u.id
-                    WHERE (v.status = 'QUEUED' OR v.status LIKE 'STEP_%')
+                    WHERE (v.status IN ('uploaded', 'QUEUED')
+                           OR v.status LIKE 'STEP_%')
                       AND v.updated_at < :threshold
                       AND COALESCE(v.dequeue_count, 0) < :max_retries
                     ORDER BY v.updated_at ASC
@@ -87,7 +89,9 @@ async def _check_and_requeue_stuck_videos():
                         )
 
                         # Keep current STEP_* status for resume, only reset
-                        # step_progress and increment retry counter
+                        # step_progress and increment retry counter.
+                        # For 'uploaded' status, keep it as-is (worker will
+                        # start from step 0).
                         await db.execute(
                             text("""
                                 UPDATE videos
