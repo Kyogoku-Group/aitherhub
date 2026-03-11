@@ -320,6 +320,8 @@ def process_job(payload: dict, msg_id: str, pop_receipt: str) -> bool:
             success = _run_live_capture_job(payload)
         elif job_type == "live_monitor":
             success = _run_live_monitor_job(payload)
+        elif job_type == "live_analysis":
+            success = _run_live_analysis_job(payload)
         else:
             # Default: run legacy process_video.py, then optionally run pipeline
             success = _run_video_job(payload)
@@ -806,6 +808,121 @@ def _run_live_monitor_job(payload: dict) -> bool:
     )
 
     return result.returncode == 0
+
+
+def _run_live_analysis_job(payload: dict) -> bool:
+    """Run LiveBoost analysis pipeline as subprocess.
+
+    The pipeline (assembling → audio → STT → OCR → sales detection → clips)
+    runs inside backend/app/ via run_live_analysis.py because it depends on
+    backend-only modules (app.services.live_analysis_pipeline).
+    """
+    job_id = payload.get("job_id")
+    video_id = payload.get("video_id")
+    email = payload.get("email", "")
+    total_chunks = payload.get("total_chunks")
+    stream_source = payload.get("stream_source", "tiktok_live")
+
+    if not job_id or not video_id:
+        log_error_type(
+            video_id or "unknown", "live_analysis", "INPUT_INVALID",
+            f"missing fields: job_id={job_id} video_id={video_id}",
+        )
+        return False
+
+    # ── Metrics ──
+    try:
+        from worker.recovery.metrics_logger import JobMetrics
+        metrics = JobMetrics(job_id=job_id, job_type="live_analysis")
+        metrics.start()
+        metrics.start_phase("processing")
+    except Exception:
+        metrics = None
+
+    # ── Heartbeat ──
+    if _heartbeat_manager:
+        _heartbeat_manager.register_job(job_id)
+
+    print(f"[worker] Starting live analysis: job={job_id} video={video_id} chunks={total_chunks}")
+
+    cmd = [
+        sys.executable,
+        os.path.join(BATCH_DIR, "run_live_analysis.py"),
+        "--job-id", str(job_id),
+        "--video-id", str(video_id),
+        "--email", email,
+    ]
+    if total_chunks is not None:
+        cmd.extend(["--total-chunks", str(total_chunks)])
+    if stream_source:
+        cmd.extend(["--stream-source", stream_source])
+
+    # PYTHONPATH must include both project root (for shared/) and backend/ (for app/)
+    backend_dir = str(PROJECT_ROOT / "backend")
+    env = {
+        **os.environ,
+        "PYTHONPATH": f"{str(PROJECT_ROOT)}:{backend_dir}:{BATCH_DIR}",
+    }
+
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=BATCH_DIR,
+            env=env,
+            start_new_session=True,
+        )
+        try:
+            proc.wait(timeout=WORKER_VIDEO_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            print(f"[worker] Live analysis timeout — killing pid={proc.pid}")
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError) as _e:
+                print(f"Suppressed: {_e}")
+            proc.wait()
+            log_error_type(job_id, "live_analysis", "TIMEOUT", f"timeout={WORKER_VIDEO_TIMEOUT}s")
+            if metrics:
+                metrics.end_phase("processing")
+                metrics.finish(status="timeout")
+            return False
+
+        if metrics:
+            metrics.end_phase("processing")
+
+        if proc.returncode == 0:
+            print(f"[worker] Live analysis completed: job={job_id}")
+            if metrics:
+                metrics.finish(status="completed")
+            return True
+        elif proc.returncode == 2:
+            print(f"[worker] Live analysis skipped (input error): job={job_id}")
+            if metrics:
+                metrics.finish(status="skipped")
+            return True
+        else:
+            log_error_type(
+                job_id, "live_analysis", "SUBPROCESS_FAIL",
+                f"exit={proc.returncode}",
+            )
+            if metrics:
+                metrics.finish(status="failed")
+            return False
+    except Exception as e:
+        log_error_type(job_id, "live_analysis", "UNKNOWN", f"EXC={type(e).__name__} {e}")
+        if metrics:
+            metrics.finish(status="error")
+        return False
+    finally:
+        # ── Unregister heartbeat ──
+        if _heartbeat_manager:
+            _heartbeat_manager.unregister_job(job_id)
+        # ── Temp cleanup ──
+        try:
+            from worker.recovery.temp_manager import JobTempDir
+            tmp = JobTempDir(job_id)
+            if tmp.exists:
+                tmp.cleanup()
+        except Exception as e:
+            print(f"[worker] Temp cleanup warning: {e}")
 
 
 # =============================================================================
