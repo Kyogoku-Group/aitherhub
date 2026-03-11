@@ -353,7 +353,9 @@ def compress_to_1080p(
         ]
 
     try:
-        COMPRESS_TIMEOUT_SECONDS = 3 * 3600  # 3 hours max for compression
+        # Dynamic timeout: scale with video duration (~1x realtime for CPU, min 1h, max 8h)
+        _duration = get_video_duration(input_path) or 7200  # fallback 2h
+        COMPRESS_TIMEOUT_SECONDS = max(3600, min(int(_duration * 1.0) + 1800, 8 * 3600))
         logger.info("[COMPRESS] FFmpeg command: %s", " ".join(cmd))
         logger.info("[COMPRESS] Timeout set to %d seconds (%.1f hours)", COMPRESS_TIMEOUT_SECONDS, COMPRESS_TIMEOUT_SECONDS / 3600)
         try:

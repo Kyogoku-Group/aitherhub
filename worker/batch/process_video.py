@@ -652,7 +652,8 @@ def main():
                 _vid_duration = float(_probe.stdout.strip())
             except Exception:
                 _vid_duration = 0
-            _analysis_timeout = max(600, min(int(_vid_duration / 60 * 10), 5400))  # 10min-90min
+            # Scale timeout: ~0.5x realtime for CPU encoding (min 10min, max 5h)
+            _analysis_timeout = max(600, min(int(_vid_duration * 0.5) + 600, 18000))  # 10min-5h
             logger.info("[ANALYSIS_VIDEO] video_duration=%.0fs, timeout=%ds", _vid_duration, _analysis_timeout)
             try:
                 analysis_video_path = generate_analysis_video(
@@ -1668,15 +1669,19 @@ def main():
             update_video_step_progress_sync(video_id, 0)
             logger.info("=== STEP 14 \u2013 FINALIZE PIPELINE (WAIT SPLIT) ===")
 
-            MAX_WAIT_SEC = 60 * 120   # 2 hours total timeout
             CHECK_INTERVAL = 5
-            STALL_TIMEOUT = 60 * 30   # 30 min stall detection
+            STALL_TIMEOUT = 60 * 60   # 60 min stall detection (long videos have slow splits)
 
             # Count total phases for progress calculation
             try:
                 total_split_phases = len(load_video_phases_sync(video_id, user_id))
             except Exception:
                 total_split_phases = 0
+
+            # Dynamic timeout: scale with number of phases (min 2h, max 8h)
+            MAX_WAIT_SEC = max(60 * 120, min(max(total_split_phases, 1) * 120, 60 * 480))  # 2h-8h
+            logger.info("[STEP14] total_split_phases=%d, MAX_WAIT_SEC=%ds (%.1fh)",
+                        total_split_phases, MAX_WAIT_SEC, MAX_WAIT_SEC / 3600)
 
             waited = 0
             last_progress_status = None

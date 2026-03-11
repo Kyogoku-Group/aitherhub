@@ -148,7 +148,7 @@ def extract_audio_full(video_path: str, out_dir: str) -> str:
 
     # Dynamic timeout based on video duration
     duration = _get_video_duration_seconds(video_path)
-    timeout = min(int(duration * 0.5) + 600, 10800)  # max 3 hours
+    timeout = min(int(duration * 0.5) + 600, 21600)  # max 6 hours (for 9h+ videos)
     timeout = max(timeout, 600)  # min 10 minutes
     print(f"[AUDIO] extract_audio_full: duration={duration:.0f}s, timeout={timeout}s")
 
@@ -195,7 +195,7 @@ def extract_audio_chunks(video_path: str, out_dir: str) -> str:
 
     # Dynamic timeout based on video duration
     duration = _get_video_duration_seconds(video_path)
-    timeout = min(int(duration * 0.5) + 600, 10800)  # max 3 hours
+    timeout = min(int(duration * 0.5) + 600, 21600)  # max 6 hours (for 9h+ videos)
     timeout = max(timeout, 600)  # min 10 minutes
     print(f"[AUDIO] extract_audio_chunks: duration={duration:.0f}s, timeout={timeout}s")
 

@@ -660,6 +660,19 @@ def detect_phases(frame_dir: str, model, on_progress=None):
     filtered = filter_min_phase(merged, total_frames, min_len=25)
     filtered = apply_max_phase(filtered, total_frames, max_len=150)
 
+    # Cap total phases to avoid excessive API calls on very long videos
+    MAX_PHASES = 150
+    if len(filtered) > MAX_PHASES:
+        # Increase max_len to reduce phase count
+        _new_max_len = max(150, total_frames // MAX_PHASES)
+        logger.info(
+            "[PHASES] Too many phases (%d > %d). Increasing max_len %d -> %d",
+            len(filtered), MAX_PHASES, 150, _new_max_len,
+        )
+        filtered = filter_min_phase(merged, total_frames, min_len=25)
+        filtered = apply_max_phase(filtered, total_frames, max_len=_new_max_len)
+        logger.info("[PHASES] After re-filter: %d phases", len(filtered))
+
     keyframes = filtered.copy()
     rep_frames = pick_representative_frames(model, keyframes, total_frames, frame_dir)
 
