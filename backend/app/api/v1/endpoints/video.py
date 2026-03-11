@@ -4923,7 +4923,7 @@ async def get_video_error_logs(
         # Verify the video belongs to the current user
         ownership = await db.execute(
             text("SELECT id FROM videos WHERE id = :vid AND user_id = :uid"),
-            {"vid": video_id, "uid": user.id},
+            {"vid": video_id, "uid": user["id"]},
         )
         if not ownership.fetchone():
             raise HTTPException(status_code=404, detail="Video not found")
