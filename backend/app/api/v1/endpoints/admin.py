@@ -27,8 +27,8 @@ async def _q(db: AsyncSession, sql: str, default=0):
         logger.warning(f"Admin query error: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _rb_err:
+            logger.debug(f"Rollback cleanup failed: {_rb_err}")
         return default
 
 
@@ -848,8 +848,8 @@ async def get_upload_health(
             logger.warning(f"Failed to fetch recent uploads: {e}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _rb_err:
+                logger.debug(f"Rollback cleanup failed: {_rb_err}")
             recent_uploads = []
 
         # ── Status distribution ──
@@ -866,8 +866,8 @@ async def get_upload_health(
             logger.warning(f"Failed to fetch status distribution: {e}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _rb_err:
+                logger.debug(f"Rollback cleanup failed: {_rb_err}")
             status_distribution = {}
 
         # ── Error breakdown (last 7 days) ──
@@ -900,8 +900,8 @@ async def get_upload_health(
             logger.warning(f"Failed to fetch error breakdown: {e}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _rb_err:
+                logger.debug(f"Rollback cleanup failed: {_rb_err}")
             recent_errors = []
 
         # ── Enqueue statistics ──
@@ -960,8 +960,8 @@ async def get_upload_health(
             logger.warning(f"Failed to fetch retry candidates: {e}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _rb_err:
+                logger.debug(f"Rollback cleanup failed: {_rb_err}")
             retry_candidates = []
 
         # ── Pipeline stage distribution ──
@@ -1007,8 +1007,8 @@ async def get_upload_health(
             logger.warning(f"Failed to fetch stage events (table may not exist): {e}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _rb_err:
+                logger.debug(f"Rollback cleanup failed: {_rb_err}")
 
         # ── Videos with upload_error_stage ──
         failed_stage_videos = []
@@ -1043,8 +1043,8 @@ async def get_upload_health(
             logger.warning(f"Failed to fetch failed stage videos (columns may not exist): {e}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _rb_err:
+                logger.debug(f"Rollback cleanup failed: {_rb_err}")
 
         return {
             "overall": {
@@ -1147,8 +1147,8 @@ async def recompute_phase_metrics(
         logger.warning(f"Migration check: {mig_err}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _rb_err:
+            logger.debug(f"Rollback cleanup failed: {_rb_err}")
 
     try:
         from app.services.phase_metrics_recalculator import recalculate_phase_metrics as _recalc
@@ -1365,8 +1365,8 @@ async def report_frontend_error(
         logger.warning(f"Failed to save frontend diagnostic: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _rb_err:
+            logger.debug(f"Rollback cleanup failed: {_rb_err}")
         # エラー報告の保存失敗はフロントに影響させない
         return {"status": "ok", "note": "save_failed"}
 

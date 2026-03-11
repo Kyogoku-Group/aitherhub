@@ -29,7 +29,7 @@ SQL_QUERY = (
 async def backfill():
     try:
         await ensure_sales_moments_table()
-    except:
+    except Exception:
         pass
 
     async with AsyncSessionLocal() as session:

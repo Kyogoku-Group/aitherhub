@@ -212,8 +212,8 @@ class VideoService:
             _logger.error(f"[enqueue] Failed to save enqueue evidence: {db_err}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug(f"Non-critical error suppressed: {_e}")
 
         # Remove upload session record if present
         if upload_id:
@@ -227,8 +227,8 @@ class VideoService:
             except Exception:
                 try:
                     await db.rollback()
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"Non-critical error suppressed: {_e}")
 
         # Clean up stale upload records for this user (older than 24 hours)
         # Do NOT delete all records - other uploads may be in progress
@@ -245,8 +245,8 @@ class VideoService:
         except Exception:
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug(f"Non-critical error suppressed: {_e}")
 
         return {
             "video_id": str(video.id),

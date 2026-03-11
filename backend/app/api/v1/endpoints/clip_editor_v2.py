@@ -357,8 +357,8 @@ async def submit_segment_feedback(
         logger.error(f"[segment_feedback] Insert failed: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
         raise HTTPException(status_code=500, detail="Failed to save feedback")
 
     return SegmentFeedbackResponse(
@@ -477,8 +477,8 @@ async def get_timeline_data(
         logger.warning(f"[timeline] phases+insights query failed, trying phases-only: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
         try:
             phases_sql = text("""
                 SELECT phase_index, time_start, time_end, phase_description
@@ -504,8 +504,8 @@ async def get_timeline_data(
             logger.warning(f"[timeline] phases-only query also failed: {e2}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug(f"Non-critical error suppressed: {_e}")
 
     # 2. Sales moments (AI markers)
     markers = []
@@ -532,8 +532,8 @@ async def get_timeline_data(
         logger.warning(f"[timeline] sales_moments query failed: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
 
     # 3. Event scores
     event_scores = []
@@ -557,8 +557,8 @@ async def get_timeline_data(
         logger.warning(f"[timeline] event_scores query failed: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
 
     # 4. Segment feedback
     feedback = []
@@ -584,8 +584,8 @@ async def get_timeline_data(
         logger.warning(f"[timeline] segment_feedback query failed: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
 
     # 5. Transcripts (actual speech-to-text data for subtitles)
     transcripts = []
@@ -613,8 +613,8 @@ async def get_timeline_data(
         logger.warning(f"[timeline] video_transcripts query failed: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
 
     # Fallback: use audio_text from video_phases
     if not transcripts:
@@ -643,8 +643,8 @@ async def get_timeline_data(
             logger.warning(f"[timeline] audio_text fallback failed: {e}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug(f"Non-critical error suppressed: {_e}")
 
     return {
         "phases": phases,
@@ -954,8 +954,8 @@ async def transcribe_clip(
         logger.warning(f"[transcribe] Failed to save to video_transcripts: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
         # Still return the segments even if DB save fails
 
     # Also update video_clips captions if clip_id exists
@@ -995,8 +995,8 @@ async def transcribe_clip(
         logger.warning(f"[transcribe] Failed to update video_clips captions: {e}")
         try:
             await db.rollback()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
 
     # Cleanup
     _cleanup_tmp(tmp_dir)
@@ -1148,8 +1148,8 @@ async def export_subtitled_clip(
             try:
                 from app.services.azure_storage import generate_sas_url
                 clip_url = await generate_sas_url(clip_url)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug(f"Non-critical error suppressed: {_e}")
 
         import httpx
         async with httpx.AsyncClient(timeout=120) as client:
@@ -1234,5 +1234,5 @@ def _cleanup_tmp(tmp_dir: str):
     try:
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug(f"Non-critical error suppressed: {_e}")

@@ -40,8 +40,8 @@ def _get_queue_client() -> QueueClient:
     client = QueueClient.from_connection_string(conn_str, queue_name)
     try:
         client.create_queue()
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug(f"Non-critical error suppressed: {_e}")
     return client
 
 

@@ -182,8 +182,8 @@ async def start_live_analysis(
             logger.error(f"[live-analysis] Failed to save enqueue evidence: {db_err}")
             try:
                 await db.rollback()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug(f"Non-critical error suppressed: {_e}")
 
         return LiveAnalysisStartResponse(
             job_id=str(job.id),

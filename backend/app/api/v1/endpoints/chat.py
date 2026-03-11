@@ -1,7 +1,9 @@
 import os
 from typing import List, Dict, Any, Optional
 
+from loguru import logger
 from fastapi import APIRouter, Depends, HTTPException, Request
+from loguru import logger
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -448,8 +450,8 @@ async def stream_chat(
                                         excel_parts.append("  " + " | ".join(vals))
                                     if len(products) > 30:
                                         excel_parts.append(f"  ... (他 {len(products) - 30} 行)")
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.debug(f"Non-critical error suppressed: {_e}")
 
                     if trend_blob_url:
                         try:
@@ -472,8 +474,8 @@ async def stream_chat(
                                         excel_parts.append("  " + " | ".join(vals))
                                     if len(trends) > 30:
                                         excel_parts.append(f"  ... (他 {len(trends) - 30} 行)")
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.debug(f"Non-critical error suppressed: {_e}")
 
                     if excel_parts:
                         excel_data_text = "\n".join(excel_parts)
@@ -611,8 +613,8 @@ async def stream_chat(
             finally:
                 try:
                     client.close()
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"Non-critical error suppressed: {_e}")
 
         # background task: use synchronous psycopg2 insert so commit is immediate
         def _bg_save_sync() -> None:
@@ -621,8 +623,8 @@ async def stream_chat(
                 try:
                     if "\\n" in full_answer or "\\r\\n" in full_answer:
                         full_answer = full_answer.replace('\\r\\n', '\r\n').replace('\\n', '\n')
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug(f"Non-critical error suppressed: {_e}")
                 question_text = None
                 for m in reversed(payload.messages):
                     if m.get("role") == "user":

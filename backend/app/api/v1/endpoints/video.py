@@ -592,8 +592,8 @@ async def get_video_detail(
                             cache_valid = sas_expire.astimezone(timezone.utc) >= now_utc
                         else:
                             cache_valid = sas_expire >= now_naive
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug(f"Non-critical error suppressed: {_e}")
 
                 if cache_valid:
                     video_clip_url = sas_token
@@ -625,8 +625,8 @@ async def get_video_detail(
                 try:
                     if r.audio_features:
                         audio_features_parsed = json.loads(r.audio_features) if isinstance(r.audio_features, str) else r.audio_features
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as _e:
+                    logger.debug(f"JSON parse skipped: {_e}")
 
                 # Parse sales_psychology_tags JSON text
                 sales_tags_parsed = []
@@ -634,8 +634,8 @@ async def get_video_detail(
                     raw_tags = getattr(r, 'sales_psychology_tags', None)
                     if raw_tags:
                         sales_tags_parsed = json.loads(raw_tags) if isinstance(raw_tags, str) else raw_tags
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as _e:
+                    logger.debug(f"JSON parse skipped: {_e}")
 
                 # Parse human_sales_tags JSON text
                 human_tags_parsed = None
@@ -643,8 +643,8 @@ async def get_video_detail(
                     raw_human_tags = getattr(r, 'human_sales_tags', None)
                     if raw_human_tags:
                         human_tags_parsed = json.loads(raw_human_tags) if isinstance(raw_human_tags, str) else raw_human_tags
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as _e:
+                    logger.debug(f"JSON parse skipped: {_e}")
 
                 report1_items.append({
                     "phase_index": int(r.phase_index),
@@ -686,8 +686,8 @@ async def get_video_detail(
                         {"sas": sas_url, "exp": exp_at, "id": pid}
                     )
                 await db.commit()
-            except Exception:
-                pass  # Non-critical
+            except Exception as _e:
+                logger.debug(f"Non-critical error suppressed: {_e}")  # Non-critical
 
         # ---- Step 5: Build report3 ----
         report3 = []
@@ -2509,8 +2509,8 @@ async def get_event_scores(
             """)
             sm_result = await db.execute(sm_sql, {"video_id": video_id})
             moments = sm_result.fetchall()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
 
         # Fetch product stats for product name matching
         product_names = []
@@ -2523,8 +2523,8 @@ async def get_event_scores(
             """)
             ps_result = await db.execute(ps_sql, {"video_id": video_id})
             product_names = [r.product_name for r in ps_result.fetchall() if r.product_name]
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
 
         # Try model-based prediction
         model_result = _predict_with_model_v4(phases, moments, product_names, video_duration)
@@ -2645,8 +2645,8 @@ def _build_feature_vector_v4(phase, product_names, video_duration):
         raw = phase.sales_psychology_tags
         if raw:
             tags = json.loads(raw) if isinstance(raw, str) else raw
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug(f"Non-critical error suppressed: {_e}")
     event_type = tags[0] if tags else "UNKNOWN"
 
     # Keyword flags
@@ -2813,8 +2813,8 @@ def _predict_heuristic_v4(phases, moments):
             raw = phase.sales_psychology_tags
             if raw:
                 tags = json.loads(raw) if isinstance(raw, str) else raw
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
         high_value_types = {"PRICE", "CTA", "URGENCY", "SOCIAL_PROOF"}
         if any(t in high_value_types for t in tags):
             score += 0.15
@@ -2896,8 +2896,8 @@ def _explain_score(phase, moments, product_names, video_duration):
         raw = phase.sales_psychology_tags
         if raw:
             tags = json.loads(raw) if isinstance(raw, str) else raw
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug(f"Non-critical error suppressed: {_e}")
     type_labels = {
         "PRICE": "価格提示フェーズ",
         "CTA": "CTAフェーズ",
@@ -2982,8 +2982,8 @@ async def get_sales_clip_candidates(
             """)
             moments_result = await db.execute(sql_moments, {"video_id": video_id})
             moments = [dict(row._mapping) for row in moments_result.fetchall()]
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
 
         phase_scores = compute_sales_scores(phases, moments)
         top_n_clamped = max(1, min(int(top_n), 10))
@@ -4249,8 +4249,8 @@ async def get_excel_info(
                     "reprocess_status": r.reprocess_status,
                     "created_at": str(r.created_at) if r.created_at else None,
                 })
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug(f"Non-critical error suppressed: {_e}")
 
         return {
             "video_id": video_id,

@@ -783,7 +783,7 @@ def load_all_audio_segments(audio_text_dir):
                     "end": float(end_s.strip()),
                     "text": text.strip()
                 })
-            except:
+            except Exception:
                 continue
 
     return segments
