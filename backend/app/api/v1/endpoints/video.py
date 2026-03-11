@@ -788,6 +788,8 @@ async def get_video_product_data(
         product_blob_url = row[0]
         trend_blob_url = row[1]
         email = row[2]
+        logger.info("[PRODUCT-DATA] video=%s product_url=%s trend_url=%s email=%s",
+                    video_id, product_blob_url is not None, trend_blob_url is not None, email)
 
         response_data = {
             "products": [],
@@ -800,8 +802,9 @@ async def get_video_product_data(
         async def _parse_excel(blob_url: str) -> list:
             """Download Excel via SAS URL and parse rows into list of dicts."""
             sas_url = generate_read_sas_from_url(blob_url, expires_hours=1)
+            logger.info("[PRODUCT-DATA] blob_url=%s sas_generated=%s", blob_url[:80] if blob_url else None, sas_url is not None)
             if not sas_url:
-                logger.warning("Failed to generate SAS for Excel blob")
+                logger.warning("Failed to generate SAS for Excel blob: %s", blob_url[:100] if blob_url else None)
                 return []
             import openpyxl
             async with httpx.AsyncClient(timeout=30.0) as client:
