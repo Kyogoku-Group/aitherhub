@@ -1,0 +1,44 @@
+name: Check Import Boundaries
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'worker/**'
+      - 'backend/**'
+      - 'shared/**'
+      - 'tests/test_import_boundaries.py'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'worker/**'
+      - 'backend/**'
+      - 'shared/**'
+      - 'tests/test_import_boundaries.py'
+
+jobs:
+  boundary-check:
+    runs-on: ubuntu-latest
+    name: Import Boundary Enforcement
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run import boundary tests
+        run: python tests/test_import_boundaries.py
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Import Boundary Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Rules enforced:" >> $GITHUB_STEP_SUMMARY
+          echo "- worker/ MUST NOT import from backend/app/" >> $GITHUB_STEP_SUMMARY
+          echo "- backend/app/ MUST NOT import from worker/" >> $GITHUB_STEP_SUMMARY
+          echo "- shared/ MUST NOT import from backend/app/ or worker/" >> $GITHUB_STEP_SUMMARY
+          echo "- worker/ and shared/ MUST NOT import FastAPI" >> $GITHUB_STEP_SUMMARY

@@ -50,6 +50,23 @@ jobs:
             git reset --hard origin/master
             echo "After:  $(git rev-parse HEAD)"
 
+            # --- Stale lock cleanup ---
+            echo ""
+            echo "=== Checking for stale worker lock ==="
+            LOCK_FILE="/tmp/simple_worker.lock"
+            if [ -f "$LOCK_FILE" ]; then
+              LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+              if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+                echo "Stale lock found (PID $LOCK_PID is dead). Removing..."
+                rm -f "$LOCK_FILE"
+                echo "Stale lock removed."
+              else
+                echo "Lock exists with active PID $LOCK_PID"
+              fi
+            else
+              echo "No lock file found."
+            fi
+
             # --- venv setup ---
             echo ""
             echo "=== Setting up virtual environment ==="
