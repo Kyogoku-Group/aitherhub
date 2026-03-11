@@ -843,6 +843,7 @@ async def get_video_product_data(
                 finally:
                     os.unlink(tmp_path)
 
+        _debug_errors = []
         # Parse product Excel
         if product_blob_url:
             try:
@@ -890,6 +891,7 @@ async def get_video_product_data(
                         logger.warning(f"Failed to cache top_products: {cache_err}")
             except Exception as e:
                 logger.warning(f"Failed to parse product Excel: {e}", exc_info=True)
+                _debug_errors.append(f"product: {type(e).__name__}: {e}")
 
         else:
             logger.info("[PRODUCT-DATA] No product_blob_url")
@@ -904,12 +906,14 @@ async def get_video_product_data(
                 response_data["has_trend_data"] = len(trends) > 0
             except Exception as e:
                 logger.warning(f"Failed to parse trend Excel: {e}", exc_info=True)
+                _debug_errors.append(f"trend: {type(e).__name__}: {e}")
 
         response_data["_debug"] = {
             "product_blob_url_present": product_blob_url is not None,
             "trend_blob_url_present": trend_blob_url is not None,
             "product_blob_url_prefix": product_blob_url[:60] if product_blob_url else None,
             "trend_blob_url_prefix": trend_blob_url[:60] if trend_blob_url else None,
+            "errors": _debug_errors,
         }
         return response_data
 
