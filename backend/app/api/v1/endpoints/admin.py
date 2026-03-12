@@ -2072,3 +2072,32 @@ async def recalc_csv_metrics(
         "logs": logs,
         "sample_metrics": updates[:3] if updates else [],
     }
+
+
+# ─── Force Video Status Update ───
+
+@router.post("/force-status/{video_id}")
+async def force_video_status(
+    video_id: str,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+):
+    """
+    動画のステータスを強制的に変更する。
+    payload: {"status": "DONE"}
+    """
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    new_status = payload.get("status")
+    if not new_status:
+        raise HTTPException(status_code=400, detail="status is required")
+
+    await db.execute(
+        text("UPDATE videos SET status = :status, step_progress = 0 WHERE id = :vid"),
+        {"status": new_status, "vid": video_id},
+    )
+    await db.commit()
+
+    return {"status": "ok", "video_id": video_id, "new_status": new_status}
