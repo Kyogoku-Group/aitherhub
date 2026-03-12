@@ -427,6 +427,269 @@ async def stream_video_status(
     )
 
 
+async def _auto_recalc_csv_metrics(
+    db: AsyncSession, video_id: str, trend_blob_url: str, time_offset_seconds: float
+) -> list:
+    """
+    Auto-recalculate CSV metrics from Excel trend data when all metrics are zero.
+    Returns list of dicts with phase_index and metric values, or empty list on failure.
+    Also persists the recalculated values to DB.
+    """
+    import httpx
+    import tempfile
+    import openpyxl
+
+    try:
+        from app.services.storage_service import generate_read_sas_from_url
+    except ImportError:
+        return []
+
+    # Download and parse trend Excel
+    sas_url = generate_read_sas_from_url(trend_blob_url, expires_hours=1)
+    if not sas_url:
+        return []
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(sas_url)
+        if resp.status_code != 200:
+            return []
+
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        f.write(resp.content)
+        tmp_path = f.name
+
+    try:
+        wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+        ws = wb.active
+        trends = []
+        if ws:
+            rows_data = list(ws.iter_rows(values_only=True))
+            if len(rows_data) >= 2:
+                headers = [str(h).strip() if h else f"col_{i}" for i, h in enumerate(rows_data[0])]
+                for data_row in rows_data[1:]:
+                    if all(v is None for v in data_row):
+                        continue
+                    item = {}
+                    for i, val in enumerate(data_row):
+                        if i < len(headers):
+                            if val is None:
+                                item[headers[i]] = None
+                            elif isinstance(val, (int, float)):
+                                item[headers[i]] = val
+                            elif hasattr(val, 'hour') and hasattr(val, 'minute'):
+                                item[headers[i]] = f"{val.hour:02d}:{val.minute:02d}"
+                            else:
+                                item[headers[i]] = str(val)
+                    trends.append(item)
+        wb.close()
+    finally:
+        os.unlink(tmp_path)
+
+    if not trends:
+        return []
+
+    # Get phases
+    phases_result = await db.execute(text("""
+        SELECT phase_index, time_start, time_end
+        FROM video_phases WHERE video_id = :vid ORDER BY phase_index ASC
+    """), {"vid": video_id})
+    phases = [{"phase_index": r[0], "time_start": float(r[1] or 0), "time_end": float(r[2] or 0)}
+              for r in phases_result.fetchall()]
+    if not phases:
+        return []
+
+    # KPI aliases
+    KPI_ALIASES = {
+        "time": ["\u6642\u9593", "time", "timestamp", "\u65f6\u95f4", "\uc2dc\uac04"],
+        "gmv": ["GMV", "gmv", "\u58f2\u4e0a", "sales", "revenue", "\u6210\u4ea4\u91d1\u989d", "\ub9e4\ucd9c"],
+        "order_count": ["\u6ce8\u6587", "order", "orders", "SKU\u6ce8\u6587\u6570", "\u8ba2\u5355", "\uc8fc\ubb38"],
+        "viewer_count": ["\u8996\u8074\u8005", "viewer", "viewers", "\u89c6\u542c\u8005", "\u89c2\u4f17", "\uc2dc\uccad\uc790"],
+        "like_count": ["\u3044\u3044\u306d", "like", "likes", "\u70b9\u8d5e", "\uc88b\uc544\uc694"],
+        "comment_count": ["\u30b3\u30e1\u30f3\u30c8", "comment", "comments", "\u8bc4\u8bba", "\ub313\uae00"],
+        "share_count": ["\u30b7\u30a7\u30a2", "share", "shares", "\u5206\u4eab", "\uacf5\uc720"],
+        "new_followers": ["\u30d5\u30a9\u30ed\u30ef\u30fc", "follower", "followers", "\u65b0\u898f\u30d5\u30a9\u30ed\u30ef\u30fc", "\u7c89\u4e1d"],
+        "product_clicks": ["\u5546\u54c1\u30af\u30ea\u30c3\u30af", "product_click", "clicks", "\u70b9\u51fb"],
+        "ctor": ["CTOR", "ctor", "conversion"],
+        "gpm": ["GPM", "gpm", "\u8996\u8074GPM"],
+    }
+
+    def _find_key(sample_dict, aliases):
+        for alias in aliases:
+            for k in sample_dict.keys():
+                if alias.lower() in k.lower():
+                    return k
+        return None
+
+    def _safe_float(val):
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return None
+
+    def _parse_time_to_seconds(val):
+        if val is None:
+            return None
+        if hasattr(val, 'hour') and hasattr(val, 'minute'):
+            return val.hour * 3600 + val.minute * 60 + getattr(val, 'second', 0)
+        val_str = str(val).strip()
+        try:
+            return float(val_str)
+        except (ValueError, TypeError):
+            pass
+        parts = val_str.split(":")
+        try:
+            if len(parts) == 2:
+                h, m = int(parts[0]), int(parts[1])
+                if h < 24:
+                    return h * 3600 + m * 60
+                else:
+                    return h * 60 + m
+            elif len(parts) == 3:
+                h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+                return h * 3600 + m * 60 + s
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    sample = trends[0]
+    time_key = _find_key(sample, KPI_ALIASES["time"])
+    if not time_key:
+        return []
+
+    gmv_key = _find_key(sample, KPI_ALIASES["gmv"])
+    order_key = _find_key(sample, KPI_ALIASES["order_count"])
+    viewer_key = _find_key(sample, KPI_ALIASES["viewer_count"])
+    like_key = _find_key(sample, KPI_ALIASES["like_count"])
+    comment_key = _find_key(sample, KPI_ALIASES["comment_count"])
+    share_key = _find_key(sample, KPI_ALIASES["share_count"])
+    follower_key = _find_key(sample, KPI_ALIASES["new_followers"])
+    click_key = _find_key(sample, KPI_ALIASES["product_clicks"])
+    conv_key = _find_key(sample, KPI_ALIASES["ctor"])
+    gpm_key = _find_key(sample, KPI_ALIASES["gpm"])
+
+    # Build timed entries
+    timed_entries = []
+    for entry in trends:
+        t_sec = _parse_time_to_seconds(entry.get(time_key))
+        if t_sec is not None:
+            timed_entries.append({"time_sec": t_sec, "entry": entry})
+    timed_entries.sort(key=lambda x: x["time_sec"])
+    if not timed_entries:
+        return []
+
+    csv_first_sec = timed_entries[0]["time_sec"]
+
+    # Build CSV slots
+    csv_slots = []
+    for i, te in enumerate(timed_entries):
+        slot_start = te["time_sec"]
+        if i + 1 < len(timed_entries):
+            slot_end = timed_entries[i + 1]["time_sec"]
+        else:
+            video_end_abs = csv_first_sec + time_offset_seconds + phases[-1]["time_end"]
+            slot_end = max(slot_start + 1800, video_end_abs)
+        csv_slots.append({"start": slot_start, "end": slot_end, "entry": te["entry"]})
+
+    # Calculate metrics for each phase
+    updates = []
+    for p in phases:
+        phase_abs_start = csv_first_sec + time_offset_seconds + p["time_start"]
+        phase_abs_end = csv_first_sec + time_offset_seconds + p["time_end"]
+
+        phase_gmv = 0.0
+        phase_orders = 0.0
+        phase_viewers = 0
+        phase_likes = 0
+        phase_comments = 0.0
+        phase_shares = 0.0
+        phase_followers = 0.0
+        phase_clicks = 0.0
+        phase_conv = 0.0
+        phase_gpm = 0.0
+
+        for slot in csv_slots:
+            overlap_start = max(phase_abs_start, slot["start"])
+            overlap_end = min(phase_abs_end, slot["end"])
+            overlap = max(0, overlap_end - overlap_start)
+            if overlap <= 0:
+                continue
+            slot_dur = max(slot["end"] - slot["start"], 1)
+            ratio = overlap / slot_dur
+            e = slot["entry"]
+
+            if gmv_key:
+                phase_gmv += (_safe_float(e.get(gmv_key)) or 0) * ratio
+            if order_key:
+                phase_orders += (_safe_float(e.get(order_key)) or 0) * ratio
+            if comment_key:
+                phase_comments += (_safe_float(e.get(comment_key)) or 0) * ratio
+            if share_key:
+                phase_shares += (_safe_float(e.get(share_key)) or 0) * ratio
+            if follower_key:
+                phase_followers += (_safe_float(e.get(follower_key)) or 0) * ratio
+            if click_key:
+                phase_clicks += (_safe_float(e.get(click_key)) or 0) * ratio
+            if viewer_key:
+                phase_viewers = max(phase_viewers, int(_safe_float(e.get(viewer_key)) or 0))
+            if like_key:
+                phase_likes = max(phase_likes, int(_safe_float(e.get(like_key)) or 0))
+            if conv_key:
+                phase_conv = max(phase_conv, _safe_float(e.get(conv_key)) or 0)
+            if gpm_key:
+                phase_gpm = max(phase_gpm, _safe_float(e.get(gpm_key)) or 0)
+
+        updates.append({
+            "phase_index": p["phase_index"],
+            "gmv": round(phase_gmv, 2),
+            "order_count": int(round(phase_orders)),
+            "viewer_count": phase_viewers,
+            "like_count": phase_likes,
+            "comment_count": int(round(phase_comments)),
+            "share_count": int(round(phase_shares)),
+            "new_followers": int(round(phase_followers)),
+            "product_clicks": int(round(phase_clicks)),
+            "conversion_rate": round(phase_conv, 6),
+            "gpm": round(phase_gpm, 2),
+        })
+
+    # Persist to DB
+    for u in updates:
+        try:
+            await db.execute(text("""
+                UPDATE video_phases
+                SET gmv = :gmv, order_count = :order_count,
+                    viewer_count = :viewer_count, like_count = :like_count,
+                    comment_count = :comment_count, share_count = :share_count,
+                    new_followers = :new_followers, product_clicks = :product_clicks,
+                    conversion_rate = :conversion_rate, gpm = :gpm,
+                    updated_at = now()
+                WHERE video_id = :video_id AND phase_index = :phase_index
+            """), {
+                "video_id": video_id,
+                "phase_index": u["phase_index"],
+                "gmv": u["gmv"],
+                "order_count": u["order_count"],
+                "viewer_count": u["viewer_count"],
+                "like_count": u["like_count"],
+                "comment_count": u["comment_count"],
+                "share_count": u["share_count"],
+                "new_followers": u["new_followers"],
+                "product_clicks": u["product_clicks"],
+                "conversion_rate": u["conversion_rate"],
+                "gpm": u["gpm"],
+            })
+        except Exception:
+            pass
+    try:
+        await db.commit()
+    except Exception:
+        pass
+
+    return updates
+
+
 @router.get("/{video_id}")
 async def get_video_detail(
     video_id: str,
@@ -448,7 +711,7 @@ async def get_video_detail(
         sql_video = text("""
             SELECT v.id, v.original_filename, v.status, v.user_id,
                    v.upload_type, v.excel_product_blob_url, v.excel_trend_blob_url,
-                   v.compressed_blob_url,
+                   v.compressed_blob_url, v.time_offset_seconds,
                    u.email
             FROM videos v
             JOIN users u ON v.user_id = u.id
@@ -680,6 +943,40 @@ async def get_video_detail(
                 })
 
         _t3 = _time.monotonic()
+
+        # ---- Step 3.5: Auto-recalc CSV metrics if all zero (lazy fix) ----
+        if (
+            video_row.status == "DONE"
+            and report1_items
+            and video_row.excel_trend_blob_url
+            and all(item["csv_metrics"]["viewer_count"] == 0 for item in report1_items)
+        ):
+            try:
+                recalc_result = await _auto_recalc_csv_metrics(
+                    db, video_id, video_row.excel_trend_blob_url,
+                    float(getattr(video_row, 'time_offset_seconds', 0) or 0),
+                )
+                if recalc_result:
+                    # Update report1_items in-place with recalculated metrics
+                    recalc_map = {u["phase_index"]: u for u in recalc_result}
+                    for item in report1_items:
+                        u = recalc_map.get(item["phase_index"])
+                        if u:
+                            item["csv_metrics"].update({
+                                "gmv": u["gmv"],
+                                "order_count": u["order_count"],
+                                "viewer_count": u["viewer_count"],
+                                "like_count": u["like_count"],
+                                "comment_count": u["comment_count"],
+                                "share_count": u["share_count"],
+                                "new_followers": u["new_followers"],
+                                "product_clicks": u["product_clicks"],
+                                "conversion_rate": u["conversion_rate"],
+                                "gpm": u["gpm"],
+                            })
+                    logger.info(f"[AUTO-RECALC] Recalculated CSV metrics for video {video_id}")
+            except Exception as _recalc_err:
+                logger.warning(f"[AUTO-RECALC] Failed for video {video_id}: {_recalc_err}")
 
         # ---- Step 4: Batch persist new SAS tokens (fire-and-forget style) ----
         if phases_needing_sas_update:
