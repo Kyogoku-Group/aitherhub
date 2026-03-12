@@ -328,6 +328,8 @@ def process_job(payload: dict, msg_id: str, pop_receipt: str):
             success = process_live_capture_job(payload)
         elif job_type == "live_monitor":
             success = process_live_monitor_job(payload)
+        elif job_type == "live_analysis":
+            success = process_live_analysis_job(payload)
         else:
             success = process_video_job(payload)
 
@@ -348,6 +350,78 @@ def process_job(payload: dict, msg_id: str, pop_receipt: str):
     finally:
         with active_jobs_lock:
             active_jobs.pop(job_id, None)
+
+
+def process_live_analysis_job(payload: dict):
+    """Handle LiveBoost analysis pipeline job.
+    Runs run_live_analysis.py which assembles chunks, extracts audio,
+    transcribes, runs OCR, detects sales moments, and generates clips.
+    """
+    job_id = payload.get("job_id")
+    video_id = payload.get("video_id")
+    email = payload.get("email", "")
+    total_chunks = payload.get("total_chunks")
+    stream_source = payload.get("stream_source", "tiktok_live")
+
+    if not job_id or not video_id:
+        log_error_type(
+            video_id or "unknown", "live_analysis", "INPUT_INVALID",
+            f"missing fields: job_id={job_id} video_id={video_id}",
+        )
+        return False
+
+    print(f"[worker] Starting live analysis: job={job_id} video={video_id} chunks={total_chunks}")
+
+    cmd = [
+        sys.executable,
+        os.path.join(BATCH_DIR, "run_live_analysis.py"),
+        "--job-id", str(job_id),
+        "--video-id", str(video_id),
+        "--email", email,
+    ]
+    if total_chunks is not None:
+        cmd.extend(["--total-chunks", str(total_chunks)])
+    if stream_source:
+        cmd.extend(["--stream-source", stream_source])
+
+    # PYTHONPATH must include project root (for shared/) and backend/ (for app/)
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "backend"))
+    env = {
+        **os.environ,
+        "PYTHONPATH": f"{project_root}:{backend_dir}:{BATCH_DIR}",
+    }
+
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=BATCH_DIR,
+            env=env,
+            start_new_session=True,
+        )
+        try:
+            proc.wait(timeout=VIDEO_PROCESS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            print(f"[worker] Live analysis timeout — killing pid={proc.pid}")
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError) as _e:
+                print(f"Suppressed: {_e}")
+            proc.wait()
+            log_error_type(job_id, "live_analysis", "TIMEOUT", f"timeout={VIDEO_PROCESS_TIMEOUT}s")
+            return False
+
+        if proc.returncode == 0:
+            print(f"[worker] Live analysis completed: job={job_id} video={video_id}")
+            return True
+        elif proc.returncode == 2:
+            print(f"[worker] Live analysis skipped (input error): job={job_id}")
+            return True  # Delete queue message
+        else:
+            log_error_type(job_id, "live_analysis", "SUBPROCESS_FAIL", f"exit_code={proc.returncode}")
+            return False
+    except Exception as e:
+        exc_name = type(e).__name__
+        log_error_type(job_id, "live_analysis", "UNKNOWN", f"EXC={exc_name} {e}")
+        return False
 
 
 def process_live_monitor_job(payload: dict):
