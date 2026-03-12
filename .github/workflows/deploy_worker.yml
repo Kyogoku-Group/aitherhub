@@ -42,7 +42,7 @@ jobs:
             set -e
 
             echo "=== AitherHub Worker Deploy ==="
-            echo "Time: \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
             # ============================================================
             # 0. DISK CLEANUP — run FIRST to ensure space for pip/rsync
@@ -72,11 +72,11 @@ jobs:
             # ============================================================
             cd /opt/aitherhub
             git config --global --add safe.directory /opt/aitherhub
-            echo "Before: \$(git rev-parse HEAD)"
+            echo "Before: $(git rev-parse HEAD)"
             git remote set-url origin https://github.com/LCJ-Group/aitherhub.git
             git fetch origin master --force
             git reset --hard origin/master
-            echo "After:  \$(git rev-parse HEAD)"
+            echo "After:  $(git rev-parse HEAD)"
 
             # ============================================================
             # 2. SYNC to /var/www/aitherhub (legacy path)
@@ -94,16 +94,14 @@ jobs:
                 --exclude='worker/batch/output/' \
                 --exclude='worker/batch/splitvideo/' \
                 --exclude='worker/batch/artifacts/' \
-                /opt/aitherhub/ /var/www/aitherhub/ || {
-                RSYNC_EXIT=\$?
-                if [ \$RSYNC_EXIT -eq 24 ]; then
-                  echo "rsync: vanished files (exit 24) — safe to ignore"
-                else
-                  echo "rsync failed with exit code \$RSYNC_EXIT"
-                  exit \$RSYNC_EXIT
-                fi
-              }
-              echo "Synced OK"
+                /opt/aitherhub/ /var/www/aitherhub/
+              RSYNC_EXIT=$?
+              if [ $RSYNC_EXIT -eq 0 ] || [ $RSYNC_EXIT -eq 24 ]; then
+                echo "Synced OK (exit=$RSYNC_EXIT)"
+              else
+                echo "rsync failed with exit code $RSYNC_EXIT"
+                exit $RSYNC_EXIT
+              fi
             else
               echo "/var/www/aitherhub does not exist — skipping"
             fi
@@ -112,11 +110,11 @@ jobs:
             # 3. STALE LOCK CLEANUP
             # ============================================================
             LOCK_FILE="/tmp/simple_worker.lock"
-            if [ -f "\$LOCK_FILE" ]; then
-              LOCK_PID=\$(cat "\$LOCK_FILE" 2>/dev/null || echo "")
-              if [ -n "\$LOCK_PID" ] && ! kill -0 "\$LOCK_PID" 2>/dev/null; then
-                rm -f "\$LOCK_FILE"
-                echo "Stale lock removed (PID \$LOCK_PID dead)"
+            if [ -f "$LOCK_FILE" ]; then
+              LOCK_PID=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+              if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+                rm -f "$LOCK_FILE"
+                echo "Stale lock removed (PID $LOCK_PID dead)"
               fi
             fi
 
@@ -141,13 +139,13 @@ jobs:
             sleep 5
 
             for i in 1 2 3; do
-              AITHER=\$(sudo systemctl is-active aither-worker 2>/dev/null || echo "inactive")
-              SIMPLE=\$(sudo systemctl is-active simple-worker 2>/dev/null || echo "inactive")
-              if [ "\$AITHER" = "active" ] || [ "\$SIMPLE" = "active" ]; then
-                echo "Worker is active (aither=\$AITHER simple=\$SIMPLE)"
+              AITHER=$(sudo systemctl is-active aither-worker 2>/dev/null || echo "inactive")
+              SIMPLE=$(sudo systemctl is-active simple-worker 2>/dev/null || echo "inactive")
+              if [ "$AITHER" = "active" ] || [ "$SIMPLE" = "active" ]; then
+                echo "Worker is active (aither=$AITHER simple=$SIMPLE)"
                 break
               fi
-              echo "Attempt \$i: waiting 5s..."
+              echo "Attempt $i: waiting 5s..."
               sleep 5
             done
 
@@ -158,7 +156,7 @@ jobs:
             echo "=== Disk status (final) ==="
             df -h / | tail -1
             echo "=== Deploy complete ==="
-            echo "Commit: \$(git rev-parse HEAD)"
+            echo "Commit: $(git rev-parse HEAD)"
           DEPLOY_SCRIPT
 
       - name: Verify deployment
@@ -167,7 +165,7 @@ jobs:
           SSH_USER: ${{ secrets.WORKER_SSH_USER }}
           COMMIT_SHA: ${{ github.sha }}
         run: |
-          DEPLOYED=\$(ssh -i ~/.ssh/worker_key -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} \
+          DEPLOYED=$(ssh -i ~/.ssh/worker_key -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} \
             "cd /opt/aitherhub && git rev-parse HEAD")
           echo "Expected: ${COMMIT_SHA}"
           echo "Deployed: ${DEPLOYED}"
@@ -184,8 +182,8 @@ jobs:
           SSH_USER: ${{ secrets.WORKER_SSH_USER }}
         run: |
           ssh -i ~/.ssh/worker_key -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} << 'HEALTHCHECK'
-            AITHER=\$(sudo systemctl is-active aither-worker 2>/dev/null || echo "inactive")
-            SIMPLE=\$(sudo systemctl is-active simple-worker 2>/dev/null || echo "inactive")
+            AITHER=$(sudo systemctl is-active aither-worker 2>/dev/null || echo "inactive")
+            SIMPLE=$(sudo systemctl is-active simple-worker 2>/dev/null || echo "inactive")
             echo "aither-worker: ${AITHER}"
             echo "simple-worker: ${SIMPLE}"
             if [ "${AITHER}" = "active" ] || [ "${SIMPLE}" = "active" ]; then
