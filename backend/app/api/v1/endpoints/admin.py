@@ -692,15 +692,17 @@ async def retry_video(
     x_admin_key: Optional[str] = Header(None),
 ):
     """Re-enqueue a stuck video for processing.
-    Generates a fresh SAS URL and pushes a new job to the queue."""
+    Supports both standard videos and LiveBoost (live_boost) videos.
+    For standard videos: generates a fresh SAS URL and pushes a new job.
+    For LiveBoost videos: creates/resets a LiveAnalysisJob and enqueues live_analysis."""
     if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
         raise HTTPException(status_code=403, detail="Forbidden")
 
     try:
-        # Get video info
+        # Get video info (including upload_type)
         sql = text("""
             SELECT v.id, v.original_filename, v.status, v.user_id,
-                   u.email as user_email
+                   v.upload_type, u.email as user_email
             FROM videos v
             LEFT JOIN users u ON v.user_id = u.id
             WHERE v.id = :vid
@@ -710,6 +712,18 @@ async def retry_video(
         if not row:
             raise HTTPException(status_code=404, detail="Video not found")
 
+        upload_type = row.upload_type or ""
+
+        # ── LiveBoost (live_boost) videos: use live_analysis pipeline ──
+        if upload_type == "live_boost":
+            return await _retry_live_boost_admin(
+                db=db,
+                video_id=str(row.id),
+                user_id=row.user_id,
+                user_email=row.user_email,
+            )
+
+        # ── Standard videos: use standard pipeline ──
         # Generate fresh SAS URL
         from app.services.storage_service import generate_download_sas
         download_url, expiry = await generate_download_sas(
@@ -719,9 +733,9 @@ async def retry_video(
             expires_in_minutes=1440,  # 24 hours
         )
 
-        # Reset status to uploaded
+        # Reset status (use STEP_0 instead of 'uploaded' per project rules)
         await db.execute(
-            text("UPDATE videos SET status = 'uploaded', step_progress = 0 WHERE id = :vid"),
+            text("UPDATE videos SET status = 'STEP_0_EXTRACT_FRAMES', step_progress = 0 WHERE id = :vid"),
             {"vid": video_id},
         )
         await db.commit()
@@ -743,6 +757,116 @@ async def retry_video(
         raise
     except Exception as e:
         logger.exception(f"Failed to retry video: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _retry_live_boost_admin(
+    db: AsyncSession,
+    video_id: str,
+    user_id: int,
+    user_email: str,
+) -> dict:
+    """Admin retry for LiveBoost videos — creates/resets LiveAnalysisJob and enqueues."""
+    import uuid as uuid_module
+    from datetime import datetime, timezone
+    from sqlalchemy import select as sa_select, update as sa_update
+
+    try:
+        from app.models.orm.live_analysis_job import LiveAnalysisJob
+        from app.services.queue_service import enqueue_job
+
+        # Check for existing job
+        result = await db.execute(
+            sa_select(LiveAnalysisJob).where(
+                LiveAnalysisJob.video_id == video_id,
+            ).order_by(LiveAnalysisJob.created_at.desc())
+        )
+        existing_job = result.scalar_one_or_none()
+
+        if existing_job:
+            existing_job.status = "pending"
+            existing_job.current_step = None
+            existing_job.progress = 0
+            existing_job.error_message = None
+            existing_job.started_at = None
+            existing_job.completed_at = None
+            existing_job.results = None
+            job = existing_job
+            total_chunks = existing_job.total_chunks
+            stream_source = existing_job.stream_source or "tiktok_live"
+        else:
+            job = LiveAnalysisJob(
+                id=uuid_module.uuid4(),
+                video_id=video_id,
+                user_id=user_id,
+                stream_source="tiktok_live",
+                status="pending",
+                progress=0,
+            )
+            db.add(job)
+            total_chunks = None
+            stream_source = "tiktok_live"
+
+        # Reset video status
+        await db.execute(
+            text("""
+                UPDATE videos
+                SET status = 'STEP_0_EXTRACT_FRAMES',
+                    step_progress = 0,
+                    error_message = NULL,
+                    updated_at = now()
+                WHERE id = :vid
+            """),
+            {"vid": video_id},
+        )
+        await db.commit()
+        await db.refresh(job)
+
+        # Enqueue live_analysis job
+        enqueue_result = await enqueue_job({
+            "job_type": "live_analysis",
+            "job_id": str(job.id),
+            "video_id": video_id,
+            "user_id": user_id,
+            "stream_source": stream_source,
+            "total_chunks": total_chunks,
+            "email": user_email or "",
+        })
+
+        if enqueue_result.success:
+            await db.execute(
+                sa_update(LiveAnalysisJob)
+                .where(LiveAnalysisJob.id == job.id)
+                .values(
+                    queue_message_id=enqueue_result.message_id,
+                    queue_enqueued_at=enqueue_result.enqueued_at,
+                    started_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+            logger.info(
+                f"[admin/retry-video/live_boost] Enqueued OK job={job.id} video={video_id}"
+            )
+        else:
+            logger.error(
+                f"[admin/retry-video/live_boost] Enqueue FAILED: {enqueue_result.error}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"LiveBoost enqueue failed: {enqueue_result.error}",
+            )
+
+        return {
+            "status": "ok",
+            "video_id": video_id,
+            "job_id": str(job.id),
+            "message": f"LiveBoost analysis re-enqueued (job={job.id})",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.exception(f"[admin/retry-video/live_boost] Failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

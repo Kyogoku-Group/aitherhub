@@ -1603,6 +1603,10 @@ async def retry_analysis(
     Re-enqueue a failed video for analysis without re-uploading.
     The uploaded video asset is preserved in Blob storage.
     Only the analysis job is re-submitted.
+
+    Supports both standard videos AND LiveBoost (live_boost) videos:
+    - Standard videos: enqueues a standard video_analysis job with blob_url
+    - LiveBoost videos: enqueues a live_analysis job (chunks are in blob storage)
     """
     try:
         user_id = user.get("user_id") or user.get("id")
@@ -1610,7 +1614,7 @@ async def retry_analysis(
         # Verify video exists and belongs to user
         sql = text("""
             SELECT v.id, v.original_filename, v.status, v.user_id,
-                   u.email as user_email
+                   v.upload_type, u.email as user_email
             FROM videos v
             LEFT JOIN users u ON v.user_id = u.id
             WHERE v.id = :vid
@@ -1641,6 +1645,20 @@ async def retry_analysis(
                        f"Retry is only available for failed or stuck videos.",
             )
 
+        previous_status = row.status
+        upload_type = row.upload_type or ""
+
+        # ── LiveBoost (live_boost) videos: use live_analysis pipeline ──
+        if upload_type == "live_boost":
+            return await _retry_live_boost_analysis(
+                db=db,
+                video_id=video_id,
+                user_id=user_id,
+                user_email=row.user_email,
+                previous_status=previous_status,
+            )
+
+        # ── Standard videos: use standard video_analysis pipeline ──
         # Generate fresh SAS URL for the existing blob
         from app.services.storage_service import generate_download_sas
         download_url, expiry = await generate_download_sas(
@@ -1652,7 +1670,6 @@ async def retry_analysis(
 
         # Determine resume status: keep current STEP_* status for resume,
         # only reset to 'uploaded' if status is ERROR or non-STEP
-        previous_status = row.status
         is_step_status = previous_status and previous_status.startswith("STEP_")
 
         if is_step_status:
@@ -1742,6 +1759,159 @@ async def retry_analysis(
         logger.exception(f"[retry-analysis] Failed: {exc}")
         raise HTTPException(status_code=500, detail=f"解析の再試行に失敗しました: {exc}")
 
+
+async def _retry_live_boost_analysis(
+    db: AsyncSession,
+    video_id: str,
+    user_id: int,
+    user_email: str,
+    previous_status: str,
+) -> dict:
+    """
+    Retry analysis for LiveBoost (live_boost) videos.
+
+    LiveBoost videos use a separate pipeline (live_analysis) that:
+    1. Downloads chunks from blob storage
+    2. Assembles them into a single video
+    3. Runs STT, OCR, sales detection, clip generation
+
+    This function:
+    - Resets or creates the LiveAnalysisJob
+    - Enqueues a live_analysis job to the worker queue
+    - Updates the videos table status
+    """
+    from app.models.orm.live_analysis_job import LiveAnalysisJob
+    from app.services.queue_service import enqueue_job
+
+    try:
+        # Check for existing LiveAnalysisJob
+        result = await db.execute(
+            select(LiveAnalysisJob).where(
+                LiveAnalysisJob.video_id == video_id,
+            ).order_by(LiveAnalysisJob.created_at.desc())
+        )
+        existing_job = result.scalar_one_or_none()
+
+        if existing_job:
+            # Reset existing job for retry
+            existing_job.status = "pending"
+            existing_job.current_step = None
+            existing_job.progress = 0
+            existing_job.error_message = None
+            existing_job.started_at = None
+            existing_job.completed_at = None
+            existing_job.results = None
+            job = existing_job
+            total_chunks = existing_job.total_chunks
+            stream_source = existing_job.stream_source or "tiktok_live"
+            logger.info(
+                f"[retry-analysis/live_boost] Reset existing job {job.id} for video {video_id}"
+            )
+        else:
+            # Create new LiveAnalysisJob
+            job = LiveAnalysisJob(
+                id=uuid_module.uuid4(),
+                video_id=video_id,
+                user_id=user_id,
+                stream_source="tiktok_live",
+                status="pending",
+                progress=0,
+            )
+            db.add(job)
+            total_chunks = None
+            stream_source = "tiktok_live"
+            logger.info(
+                f"[retry-analysis/live_boost] Created new job for video {video_id}"
+            )
+
+        # Reset video status
+        await db.execute(
+            text("""
+                UPDATE videos
+                SET status = 'STEP_0_EXTRACT_FRAMES',
+                    step_progress = 0,
+                    error_message = NULL,
+                    updated_at = now()
+                WHERE id = :vid
+            """),
+            {"vid": video_id},
+        )
+        await db.commit()
+        await db.refresh(job)
+
+        # Enqueue live_analysis job
+        queue_payload = {
+            "job_type": "live_analysis",
+            "job_id": str(job.id),
+            "video_id": video_id,
+            "user_id": user_id,
+            "stream_source": stream_source,
+            "total_chunks": total_chunks,
+            "email": user_email or "",
+        }
+        enqueue_result = await enqueue_job(queue_payload)
+
+        if enqueue_result.success:
+            from sqlalchemy import update as sa_update
+            await db.execute(
+                sa_update(LiveAnalysisJob)
+                .where(LiveAnalysisJob.id == job.id)
+                .values(
+                    queue_message_id=enqueue_result.message_id,
+                    queue_enqueued_at=enqueue_result.enqueued_at,
+                    started_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+            logger.info(
+                f"[retry-analysis/live_boost] Enqueued OK job={job.id} video={video_id} "
+                f"msg_id={enqueue_result.message_id}"
+            )
+        else:
+            # Enqueue failed — mark job as failed
+            await db.execute(
+                sa_update(LiveAnalysisJob)
+                .where(LiveAnalysisJob.id == job.id)
+                .values(
+                    status="failed",
+                    error_message=f"Retry enqueue failed: {enqueue_result.error}",
+                )
+            )
+            await db.execute(
+                text("""
+                    UPDATE videos
+                    SET status = 'ERROR', updated_at = now()
+                    WHERE id = :vid
+                """),
+                {"vid": video_id},
+            )
+            await db.commit()
+            logger.error(
+                f"[retry-analysis/live_boost] Enqueue FAILED for video {video_id}: "
+                f"{enqueue_result.error}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"LiveBoost解析の再投入に失敗しました: {enqueue_result.error}",
+            )
+
+        return {
+            "success": True,
+            "video_id": video_id,
+            "message": "LiveBoost解析を再開しました。チャンクの結合から開始します。",
+            "new_status": "STEP_0_EXTRACT_FRAMES",
+            "job_id": str(job.id),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(f"[retry-analysis/live_boost] Failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"LiveBoost解析の再試行に失敗しました: {exc}",
+        )
 
 
 # =========================
