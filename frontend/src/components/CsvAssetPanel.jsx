@@ -81,15 +81,27 @@ export default function CsvAssetPanel({ videoData, onReplace, onRefresh }) {
     }
   };
 
-  // 再検証
+  // 再検証 - retry-analysis APIを呼び出してSTEP 5からCSVメトリクスを再計算
   const handleRevalidate = async () => {
+    if (!videoData?.id) return;
     setRevalidating(true);
     try {
-      // フロントエンドで再度バリデーションを実行するため、onReplaceを呼ぶ
-      // ここでは簡易的にexcel-infoを再取得
-      await loadExcelInfo();
+      const res = await api.post(`/api/v1/videos/${videoData.id}/retry-analysis`);
+      if (res?.success) {
+        alert('再検証を開始しました。処理が完了するまで数分かかる場合があります。');
+        // 親コンポーネントにリフレッシュを通知
+        if (onRefresh) onRefresh();
+      } else {
+        alert(`再検証に失敗しました: ${res?.detail || '不明なエラー'}`);
+      }
+    } catch (err) {
+      console.error('[CsvAssetPanel] retry-analysis failed:', err);
+      const msg = err?.response?.data?.detail || err?.message || '不明なエラー';
+      alert(`再検証に失敗しました: ${msg}`);
     } finally {
       setRevalidating(false);
+      // Excel情報も再取得
+      await loadExcelInfo();
     }
   };
 

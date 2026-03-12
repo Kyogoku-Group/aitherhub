@@ -1089,68 +1089,107 @@ def main():
             # スコア付きスロットをtime_secでインデックス化
             score_map = {s["time_sec"]: s["score"] for s in scored_slots}
 
+            # ── CSV スロット区間の構築 ──
+            # CSVは30分間隔等の粗い粒度。各CSVエントリが「次のエントリまで」の
+            # 区間を代表すると見なし、フェーズとの重なり時間で按分する。
+            csv_slots = []  # [{"start": float, "end": float, "entry": dict}]
+            for i, te in enumerate(timed_entries):
+                slot_start = te["time_sec"]
+                if i + 1 < len(timed_entries):
+                    slot_end = timed_entries[i + 1]["time_sec"]
+                else:
+                    # 最後のスロット: 動画の最後まで
+                    video_end_abs = csv_first_sec + time_offset_seconds + (phase_units[-1].get("time_range", {}).get("end_sec", 0) if phase_units else 0)
+                    slot_end = max(slot_start + 1800, video_end_abs)  # 最低30分
+                csv_slots.append({"start": slot_start, "end": slot_end, "entry": te["entry"]})
+
+            logger.info("[CSV_METRICS] Built %d CSV slots for interpolation", len(csv_slots))
+            if csv_slots:
+                logger.info("[CSV_METRICS] Slot ranges: %s",
+                    [(f"{s['start']:.0f}-{s['end']:.0f}") for s in csv_slots])
+
             for p in phase_units:
                 tr = p.get("time_range", {})
                 start_sec = tr.get("start_sec", 0)
                 end_sec = tr.get("end_sec", 0)
 
-                # CSVタイムラインに合わせて動画内秒数をCSV絶対時刻に変換
-                # csv_first_sec: CSVの最初の行の絶対時刻（秒）例: 14:30:00 = 52200
-                # time_offset_seconds: この動画がCSVタイムライン内のどこから始まるか
-                #   例: 単一動画なら 0、バッチ2本目なら 3600 など
-                # start_sec / end_sec: 動画内のフェーズ開始・終了秒（0始まり）
-                # 正しい変換: phase_abs = csv_first_sec + time_offset_seconds + start_sec
                 phase_abs_start = csv_first_sec + time_offset_seconds + start_sec
                 phase_abs_end   = csv_first_sec + time_offset_seconds + end_sec
                 sales_info = match_sales_to_phase(trends, phase_abs_start, phase_abs_end)
                 p["sales_data"] = sales_info
-                logger.info(
-                    "[CSV_METRICS] Phase %s: start_sec=%.1f end_sec=%.1f "
-                    "phase_abs_start=%.1f phase_abs_end=%.1f (csv_first=%.1f offset=%.1f)",
-                    p.get("phase_index", "?"), start_sec, end_sec,
-                    phase_abs_start, phase_abs_end,
-                    csv_first_sec, time_offset_seconds,
-                )
 
-                # フェーズに重なるCSVエントリを集約
-                phase_gmv = 0
-                phase_orders = 0
+                # ── 按分ロジック ──
+                # フェーズとCSVスロットの重なり時間に基づいてメトリクスを按分
+                phase_gmv = 0.0
+                phase_orders = 0.0
                 phase_viewers = 0
                 phase_likes = 0
-                phase_comments = 0
-                phase_shares = 0
-                phase_followers = 0
-                phase_clicks = 0
-                phase_conv = 0
-                phase_gpm = 0
+                phase_comments = 0.0
+                phase_shares = 0.0
+                phase_followers = 0.0
+                phase_clicks = 0.0
+                phase_conv = 0.0
+                phase_gpm = 0.0
                 phase_score = 0
                 match_count = 0
 
-                for te in timed_entries:
-                    t = te["time_sec"]
-                    e = te["entry"]
-                    if t >= phase_abs_start and t <= phase_abs_end:
-                        match_count += 1
-                        if gmv_key: phase_gmv += _safe_float(e.get(gmv_key)) or 0
-                        if order_key: phase_orders += int(_safe_float(e.get(order_key)) or 0)
-                        if viewer_key: phase_viewers = max(phase_viewers, int(_safe_float(e.get(viewer_key)) or 0))
-                        if like_key: phase_likes = max(phase_likes, int(_safe_float(e.get(like_key)) or 0))
-                        if comment_key: phase_comments += int(_safe_float(e.get(comment_key)) or 0)
-                        if share_key: phase_shares += int(_safe_float(e.get(share_key)) or 0)
-                        if follower_key: phase_followers += int(_safe_float(e.get(follower_key)) or 0)
-                        if click_key: phase_clicks += int(_safe_float(e.get(click_key)) or 0)
-                        if conv_key:
-                            cv = _safe_float(e.get(conv_key)) or 0
-                            phase_conv = max(phase_conv, cv)
-                        if gpm_key:
-                            gv = _safe_float(e.get(gpm_key)) or 0
-                            phase_gpm = max(phase_gpm, gv)
-                        phase_score = max(phase_score, score_map.get(t, 0))
+                phase_dur = max(phase_abs_end - phase_abs_start, 1)  # ゼロ除算防止
 
-                logger.info(
-                    "[CSV_METRICS] Phase %s: match_count=%d gmv=%.1f orders=%d viewers=%d",
-                    p.get("phase_index", "?"), match_count, phase_gmv, phase_orders, phase_viewers,
-                )
+                for slot in csv_slots:
+                    # フェーズとスロットの重なりを計算
+                    overlap_start = max(phase_abs_start, slot["start"])
+                    overlap_end = min(phase_abs_end, slot["end"])
+                    overlap = max(0, overlap_end - overlap_start)
+                    if overlap <= 0:
+                        continue
+
+                    slot_dur = max(slot["end"] - slot["start"], 1)
+                    ratio = overlap / slot_dur  # このフェーズが受け取るスロットの割合
+                    e = slot["entry"]
+                    match_count += 1
+
+                    # 加算型メトリクス: 按分
+                    if gmv_key:
+                        phase_gmv += (_safe_float(e.get(gmv_key)) or 0) * ratio
+                    if order_key:
+                        phase_orders += (_safe_float(e.get(order_key)) or 0) * ratio
+                    if comment_key:
+                        phase_comments += (_safe_float(e.get(comment_key)) or 0) * ratio
+                    if share_key:
+                        phase_shares += (_safe_float(e.get(share_key)) or 0) * ratio
+                    if follower_key:
+                        phase_followers += (_safe_float(e.get(follower_key)) or 0) * ratio
+                    if click_key:
+                        phase_clicks += (_safe_float(e.get(click_key)) or 0) * ratio
+
+                    # スナップショット型メトリクス: 最大値（按分しない）
+                    if viewer_key:
+                        phase_viewers = max(phase_viewers, int(_safe_float(e.get(viewer_key)) or 0))
+                    if like_key:
+                        phase_likes = max(phase_likes, int(_safe_float(e.get(like_key)) or 0))
+                    if conv_key:
+                        cv = _safe_float(e.get(conv_key)) or 0
+                        phase_conv = max(phase_conv, cv)
+                    if gpm_key:
+                        gv = _safe_float(e.get(gpm_key)) or 0
+                        phase_gpm = max(phase_gpm, gv)
+                    phase_score = max(phase_score, score_map.get(slot["start"], 0))
+
+                # 加算型を整数に丸める
+                phase_orders = int(round(phase_orders))
+                phase_comments = int(round(phase_comments))
+                phase_shares = int(round(phase_shares))
+                phase_followers = int(round(phase_followers))
+                phase_clicks = int(round(phase_clicks))
+
+                if p.get("phase_index", 0) <= 3 or match_count > 0:
+                    logger.info(
+                        "[CSV_METRICS] Phase %s: start=%.0f end=%.0f abs_start=%.0f abs_end=%.0f "
+                        "match_count=%d gmv=%.1f orders=%d viewers=%d",
+                        p.get("phase_index", "?"), start_sec, end_sec,
+                        phase_abs_start, phase_abs_end,
+                        match_count, phase_gmv, phase_orders, phase_viewers,
+                    )
 
                 # sales_dataから商品名を取得
                 phase_product_names = sales_info.get("products_sold", []) if sales_info else []
