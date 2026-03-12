@@ -96,6 +96,14 @@ async def main():
     new_query = urlencode(qp, doseq=True)
     database_url = urlunparse(parsed._replace(query=new_query))
 
+    # Debug: log sanitized URL (mask password)
+    _safe_url = database_url
+    if "@" in _safe_url:
+        _pre, _post = _safe_url.split("@", 1)
+        _safe_url = _pre.rsplit(":", 1)[0] + ":***@" + _post
+    logger.info(f"[run_live_analysis] DB URL (sanitized): {_safe_url}")
+    logger.info(f"[run_live_analysis] connect_args keys: {list(connect_args.keys())}")
+
     engine = create_async_engine(database_url, echo=False, connect_args=connect_args)
     session_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
