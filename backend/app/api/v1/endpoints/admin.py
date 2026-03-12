@@ -2531,11 +2531,15 @@ async def get_ai_context(
     # ━━ プロジェクトの永続記憶（lessons_learned）━━
     try:
         # scopeフィルタ: related_featureでフィルタリング
+        # - scope=liveboost → related_feature='liveboost' のみ + 共通(NULL/空)
+        # - scope=aitherhub → related_feature!='liveboost' (既存の日本語feature名も含む)
+        # - scope省略 → 全件
         scope_filter = ""
         scope_params = {}
-        if scope:
-            scope_filter = "AND (related_feature = :scope OR related_feature IS NULL OR related_feature = '')"
-            scope_params["scope"] = scope
+        if scope == "liveboost":
+            scope_filter = "AND (related_feature = 'liveboost' OR related_feature IS NULL OR related_feature = '')"
+        elif scope == "aitherhub":
+            scope_filter = "AND (related_feature != 'liveboost' OR related_feature IS NULL OR related_feature = '')"
 
         result = await db.execute(text(f"""
             SELECT id, category, title, content, related_files, related_feature
