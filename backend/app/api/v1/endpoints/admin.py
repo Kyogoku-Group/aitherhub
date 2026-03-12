@@ -2101,3 +2101,523 @@ async def force_video_status(
     await db.commit()
 
     return {"status": "ok", "video_id": video_id, "new_status": new_status}
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SYSTEM ERROR LOGS (video_error_logs) – 管理画面表示用
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/system-error-logs")
+async def get_system_error_logs(
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+    video_id: Optional[str] = None,
+    error_code: Optional[str] = None,
+    source: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """video_error_logs の一覧を返す（管理画面 Diagnostics 用）"""
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        # Ensure table exists
+        await db.execute(text("""
+            CREATE TABLE IF NOT EXISTS video_error_logs (
+                id BIGSERIAL PRIMARY KEY,
+                video_id UUID NOT NULL,
+                error_code VARCHAR(100) NOT NULL,
+                error_step VARCHAR(100),
+                error_message TEXT,
+                error_detail TEXT,
+                source VARCHAR(50) DEFAULT 'worker',
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """))
+
+        conditions = []
+        params = {"limit": limit, "offset": offset}
+        if video_id:
+            conditions.append("CAST(vel.video_id AS TEXT) LIKE :video_id")
+            params["video_id"] = f"%{video_id}%"
+        if error_code:
+            conditions.append("vel.error_code ILIKE :error_code")
+            params["error_code"] = f"%{error_code}%"
+        if source:
+            conditions.append("vel.source = :source")
+            params["source"] = source
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        count_result = await db.execute(
+            text(f"SELECT COUNT(*) FROM video_error_logs vel {where}"),
+            params,
+        )
+        total = count_result.scalar() or 0
+
+        result = await db.execute(
+            text(f"""
+                SELECT vel.id, vel.video_id, vel.error_code, vel.error_step,
+                       vel.error_message, vel.source, vel.created_at,
+                       v.original_filename
+                FROM video_error_logs vel
+                LEFT JOIN videos v ON vel.video_id = v.id
+                {where}
+                ORDER BY vel.created_at DESC
+                LIMIT :limit OFFSET :offset
+            """),
+            params,
+        )
+        rows = result.fetchall()
+        errors = []
+        for r in rows:
+            errors.append({
+                "id": r.id,
+                "video_id": str(r.video_id),
+                "filename": r.original_filename or "",
+                "error_code": r.error_code,
+                "error_step": r.error_step,
+                "error_message": r.error_message,
+                "source": r.source,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            })
+
+        return {"total": total, "errors": errors}
+    except Exception as e:
+        logger.exception(f"Failed to fetch system error logs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/system-error-logs/summary")
+async def get_system_error_logs_summary(
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+    hours: int = 24,
+):
+    """直近N時間のエラーサマリー"""
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        cutoff = f"NOW() - INTERVAL '{hours} hours'"
+
+        total_result = await db.execute(
+            text(f"SELECT COUNT(*) FROM video_error_logs WHERE created_at >= {cutoff}")
+        )
+        total = total_result.scalar() or 0
+
+        by_code_result = await db.execute(
+            text(f"""
+                SELECT error_code, COUNT(*) as cnt
+                FROM video_error_logs WHERE created_at >= {cutoff}
+                GROUP BY error_code ORDER BY cnt DESC LIMIT 20
+            """)
+        )
+        by_code = {r.error_code: r.cnt for r in by_code_result.fetchall()}
+
+        by_step_result = await db.execute(
+            text(f"""
+                SELECT error_step, COUNT(*) as cnt
+                FROM video_error_logs WHERE created_at >= {cutoff}
+                GROUP BY error_step ORDER BY cnt DESC LIMIT 20
+            """)
+        )
+        by_step = {(r.error_step or "unknown"): r.cnt for r in by_step_result.fetchall()}
+
+        by_source_result = await db.execute(
+            text(f"""
+                SELECT source, COUNT(*) as cnt
+                FROM video_error_logs WHERE created_at >= {cutoff}
+                GROUP BY source ORDER BY cnt DESC
+            """)
+        )
+        by_source = {(r.source or "unknown"): r.cnt for r in by_source_result.fetchall()}
+
+        return {
+            "total_errors": total,
+            "period_hours": hours,
+            "by_error_code": by_code,
+            "by_step": by_step,
+            "by_source": by_source,
+        }
+    except Exception as e:
+        logger.exception(f"Failed to fetch error summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# BUG REPORTS – 問題→原因→解決策の記録
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/bug-reports")
+async def list_bug_reports(
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+    status: Optional[str] = None,
+    severity: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """バグレポート一覧"""
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        conditions = []
+        params = {"limit": limit, "offset": offset}
+        if status:
+            conditions.append("status = :status")
+            params["status"] = status
+        if severity:
+            conditions.append("severity = :severity")
+            params["severity"] = severity
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        count_result = await db.execute(
+            text(f"SELECT COUNT(*) FROM bug_reports {where}"), params
+        )
+        total = count_result.scalar() or 0
+
+        result = await db.execute(
+            text(f"""
+                SELECT * FROM bug_reports {where}
+                ORDER BY
+                    CASE status WHEN 'open' THEN 0 WHEN 'investigating' THEN 1
+                                WHEN 'resolved' THEN 2 ELSE 3 END,
+                    created_at DESC
+                LIMIT :limit OFFSET :offset
+            """),
+            params,
+        )
+        rows = result.fetchall()
+        reports = [dict(r._mapping) for r in rows]
+        # Serialize datetimes
+        for r in reports:
+            for k in ("created_at", "updated_at", "resolved_at"):
+                if r.get(k):
+                    r[k] = r[k].isoformat()
+
+        return {"total": total, "reports": reports}
+    except Exception as e:
+        logger.exception(f"Failed to fetch bug reports: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/bug-reports")
+async def create_bug_report(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+):
+    """バグレポート作成"""
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        result = await db.execute(
+            text("""
+                INSERT INTO bug_reports
+                    (title, severity, status, category, symptom, root_cause,
+                     solution, affected_files, related_video_ids, reported_by)
+                VALUES
+                    (:title, :severity, :status, :category, :symptom, :root_cause,
+                     :solution, :affected_files, :related_video_ids, :reported_by)
+                RETURNING id
+            """),
+            {
+                "title": payload.get("title", "Untitled"),
+                "severity": payload.get("severity", "medium"),
+                "status": payload.get("status", "open"),
+                "category": payload.get("category", "general"),
+                "symptom": payload.get("symptom", ""),
+                "root_cause": payload.get("root_cause", ""),
+                "solution": payload.get("solution", ""),
+                "affected_files": payload.get("affected_files", ""),
+                "related_video_ids": payload.get("related_video_ids", ""),
+                "reported_by": payload.get("reported_by", "system"),
+            },
+        )
+        bug_id = result.scalar()
+        await db.commit()
+        return {"status": "ok", "id": bug_id}
+    except Exception as e:
+        await db.rollback()
+        logger.exception(f"Failed to create bug report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/bug-reports/{bug_id}")
+async def update_bug_report(
+    bug_id: int,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+):
+    """バグレポート更新（解決策の追記など）"""
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        set_clauses = []
+        params = {"bug_id": bug_id}
+
+        allowed_fields = [
+            "title", "severity", "status", "category", "symptom",
+            "root_cause", "solution", "affected_files", "related_video_ids",
+            "resolved_by",
+        ]
+        for field in allowed_fields:
+            if field in payload:
+                set_clauses.append(f"{field} = :{field}")
+                params[field] = payload[field]
+
+        if not set_clauses:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        # Auto-set resolved_at when status changes to resolved
+        if payload.get("status") == "resolved":
+            set_clauses.append("resolved_at = NOW()")
+
+        set_clauses.append("updated_at = NOW()")
+
+        await db.execute(
+            text(f"UPDATE bug_reports SET {', '.join(set_clauses)} WHERE id = :bug_id"),
+            params,
+        )
+        await db.commit()
+        return {"status": "ok", "id": bug_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.exception(f"Failed to update bug report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# WORK LOGS – デプロイ・修正・作業の履歴
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/work-logs")
+async def list_work_logs(
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+    action: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """作業ログ一覧"""
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        conditions = []
+        params = {"limit": limit, "offset": offset}
+        if action:
+            conditions.append("action = :action")
+            params["action"] = action
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        count_result = await db.execute(
+            text(f"SELECT COUNT(*) FROM work_logs {where}"), params
+        )
+        total = count_result.scalar() or 0
+
+        result = await db.execute(
+            text(f"""
+                SELECT * FROM work_logs {where}
+                ORDER BY created_at DESC
+                LIMIT :limit OFFSET :offset
+            """),
+            params,
+        )
+        rows = result.fetchall()
+        logs = [dict(r._mapping) for r in rows]
+        for l in logs:
+            if l.get("created_at"):
+                l["created_at"] = l["created_at"].isoformat()
+
+        return {"total": total, "logs": logs}
+    except Exception as e:
+        logger.exception(f"Failed to fetch work logs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/work-logs")
+async def create_work_log(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+):
+    """作業ログ作成"""
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        result = await db.execute(
+            text("""
+                INSERT INTO work_logs
+                    (action, summary, details, files_changed,
+                     commit_hash, deployed_to, author, related_bug_id)
+                VALUES
+                    (:action, :summary, :details, :files_changed,
+                     :commit_hash, :deployed_to, :author, :related_bug_id)
+                RETURNING id
+            """),
+            {
+                "action": payload.get("action", "other"),
+                "summary": payload.get("summary", ""),
+                "details": payload.get("details", ""),
+                "files_changed": payload.get("files_changed", ""),
+                "commit_hash": payload.get("commit_hash", ""),
+                "deployed_to": payload.get("deployed_to", ""),
+                "author": payload.get("author", "manus-ai"),
+                "related_bug_id": payload.get("related_bug_id"),
+            },
+        )
+        log_id = result.scalar()
+        await db.commit()
+        return {"status": "ok", "id": log_id}
+    except Exception as e:
+        await db.rollback()
+        logger.exception(f"Failed to create work log: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# AI CONTEXT ENDPOINT – AI読み取り用の構造化サマリー
+# ═══════════════════════════════════════════════════════════════════════
+
+@router.get("/ai-context")
+async def get_ai_context(
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+):
+    """
+    AI（Manus）が毎回タスク開始時に読むための構造化コンテキスト。
+    トークン節約のため簡潔なJSON形式で返す。
+
+    含まれる情報:
+      - open_bugs: 未解決のバグ一覧
+      - recent_errors: 直近24hのエラーサマリー
+      - recent_work: 直近の作業ログ
+      - error_videos: 現在ERRORステータスの動画一覧
+      - stuck_videos: 長時間停滞中の動画一覧
+    """
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    context = {}
+
+    # 1. Open bugs
+    try:
+        result = await db.execute(text("""
+            SELECT id, title, severity, category, symptom, root_cause, status, created_at
+            FROM bug_reports
+            WHERE status IN ('open', 'investigating')
+            ORDER BY
+                CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+                              WHEN 'medium' THEN 2 ELSE 3 END,
+                created_at DESC
+            LIMIT 20
+        """))
+        rows = result.fetchall()
+        context["open_bugs"] = [
+            {
+                "id": r.id, "title": r.title, "severity": r.severity,
+                "category": r.category, "symptom": (r.symptom or "")[:200],
+                "root_cause": (r.root_cause or "")[:200], "status": r.status,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        context["open_bugs"] = f"error: {e}"
+
+    # 2. Recent errors (24h summary)
+    try:
+        total_result = await db.execute(text(
+            "SELECT COUNT(*) FROM video_error_logs WHERE created_at >= NOW() - INTERVAL '24 hours'"
+        ))
+        total = total_result.scalar() or 0
+
+        top_codes = await db.execute(text("""
+            SELECT error_code, COUNT(*) as cnt
+            FROM video_error_logs WHERE created_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY error_code ORDER BY cnt DESC LIMIT 10
+        """))
+        context["recent_errors"] = {
+            "total_24h": total,
+            "top_codes": {r.error_code: r.cnt for r in top_codes.fetchall()},
+        }
+    except Exception as e:
+        context["recent_errors"] = f"error: {e}"
+
+    # 3. Recent work logs
+    try:
+        result = await db.execute(text("""
+            SELECT id, action, summary, commit_hash, created_at
+            FROM work_logs ORDER BY created_at DESC LIMIT 10
+        """))
+        rows = result.fetchall()
+        context["recent_work"] = [
+            {
+                "id": r.id, "action": r.action,
+                "summary": (r.summary or "")[:200],
+                "commit": r.commit_hash or "",
+                "at": r.created_at.isoformat() if r.created_at else "",
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        context["recent_work"] = f"error: {e}"
+
+    # 4. Error videos
+    try:
+        result = await db.execute(text("""
+            SELECT id, original_filename, status, last_error_code, last_error_message, updated_at
+            FROM videos
+            WHERE status IN ('ERROR', 'error')
+            ORDER BY updated_at DESC
+            LIMIT 20
+        """))
+        rows = result.fetchall()
+        context["error_videos"] = [
+            {
+                "id": str(r.id),
+                "file": r.original_filename or "",
+                "error": r.last_error_code or "",
+                "msg": (r.last_error_message or "")[:200],
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        context["error_videos"] = f"error: {e}"
+
+    # 5. Stuck videos (uploaded/processing for > 30 min)
+    try:
+        result = await db.execute(text("""
+            SELECT id, original_filename, status, updated_at
+            FROM videos
+            WHERE status NOT IN ('DONE', 'COMPLETED', 'ERROR', 'error', 'deleted')
+              AND updated_at < NOW() - INTERVAL '30 minutes'
+            ORDER BY updated_at ASC
+            LIMIT 20
+        """))
+        rows = result.fetchall()
+        context["stuck_videos"] = [
+            {
+                "id": str(r.id),
+                "file": r.original_filename or "",
+                "status": r.status or "",
+                "since": r.updated_at.isoformat() if r.updated_at else "",
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        context["stuck_videos"] = f"error: {e}"
+
+    return context

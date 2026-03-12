@@ -217,6 +217,64 @@ async def ensure_tables_exist():
     except Exception as e:
         logger.warning(f"Failed to ensure video_error_logs table on startup: {e}")
 
+    # ── Bug reports & Work logs tables ──
+    try:
+        from app.core.db import engine
+        from sqlalchemy import text as _text
+
+        async with engine.begin() as conn:
+            # bug_reports: 問題→原因→解決策の記録
+            await conn.execute(_text("""
+                CREATE TABLE IF NOT EXISTS bug_reports (
+                    id BIGSERIAL PRIMARY KEY,
+                    title VARCHAR(500) NOT NULL,
+                    severity VARCHAR(20) NOT NULL DEFAULT 'medium',
+                    status VARCHAR(20) NOT NULL DEFAULT 'open',
+                    category VARCHAR(100) DEFAULT 'general',
+                    symptom TEXT,
+                    root_cause TEXT,
+                    solution TEXT,
+                    affected_files TEXT,
+                    related_video_ids TEXT,
+                    reported_by VARCHAR(100) DEFAULT 'system',
+                    resolved_by VARCHAR(100),
+                    resolved_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            await conn.execute(_text("""
+                CREATE INDEX IF NOT EXISTS idx_br_status ON bug_reports (status)
+            """))
+            await conn.execute(_text("""
+                CREATE INDEX IF NOT EXISTS idx_br_created_at ON bug_reports (created_at DESC)
+            """))
+
+            # work_logs: デプロイ・修正・作業の履歴
+            await conn.execute(_text("""
+                CREATE TABLE IF NOT EXISTS work_logs (
+                    id BIGSERIAL PRIMARY KEY,
+                    action VARCHAR(100) NOT NULL,
+                    summary TEXT NOT NULL,
+                    details TEXT,
+                    files_changed TEXT,
+                    commit_hash VARCHAR(100),
+                    deployed_to VARCHAR(100),
+                    author VARCHAR(100) DEFAULT 'manus-ai',
+                    related_bug_id BIGINT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+            await conn.execute(_text("""
+                CREATE INDEX IF NOT EXISTS idx_wl_action ON work_logs (action)
+            """))
+            await conn.execute(_text("""
+                CREATE INDEX IF NOT EXISTS idx_wl_created_at ON work_logs (created_at DESC)
+            """))
+        logger.info("bug_reports & work_logs tables verified/created")
+    except Exception as e:
+        logger.warning(f"Failed to ensure bug_reports/work_logs tables on startup: {e}")
+
 
 @app.on_event("startup")
 async def restore_live_sessions():

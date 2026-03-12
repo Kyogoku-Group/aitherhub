@@ -3,6 +3,9 @@ import axios from "axios";
 import AdminVideoList from "./admin/AdminVideoList";
 import AdminVideoDetail from "./admin/AdminVideoDetail";
 import AdminDiagnostics from "./admin/AdminDiagnostics";
+import AdminSystemErrors from "./admin/AdminSystemErrors";
+import AdminBugReports from "./admin/AdminBugReports";
+import AdminWorkLogs from "./admin/AdminWorkLogs";
 
 const ADMIN_ID = "aither";
 const ADMIN_PASS = "hub";
@@ -245,6 +248,36 @@ export default function AdminDashboard() {
           >
             Diagnostics
           </button>
+          <button
+            onClick={() => setActiveTab("system-errors")}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+              activeTab === "system-errors"
+                ? "bg-white text-red-600 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            System Errors
+          </button>
+          <button
+            onClick={() => setActiveTab("bug-reports")}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+              activeTab === "bug-reports"
+                ? "bg-white text-orange-600 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            Bug Reports
+          </button>
+          <button
+            onClick={() => setActiveTab("work-logs")}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+              activeTab === "work-logs"
+                ? "bg-white text-blue-600 shadow-sm"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            Work Logs
+          </button>
         </div>
 
         {activeTab === "dashboard" && (
@@ -317,6 +350,15 @@ export default function AdminDashboard() {
         )}
         {activeTab === "diagnostics" && (
           <AdminDiagnostics adminKey={`${ADMIN_ID}:${ADMIN_PASS}`} />
+        )}
+        {activeTab === "system-errors" && (
+          <AdminSystemErrors adminKey={`${ADMIN_ID}:${ADMIN_PASS}`} />
+        )}
+        {activeTab === "bug-reports" && (
+          <AdminBugReports adminKey={`${ADMIN_ID}:${ADMIN_PASS}`} />
+        )}
+        {activeTab === "work-logs" && (
+          <AdminWorkLogs adminKey={`${ADMIN_ID}:${ADMIN_PASS}`} />
         )}
       </div>
     </div>

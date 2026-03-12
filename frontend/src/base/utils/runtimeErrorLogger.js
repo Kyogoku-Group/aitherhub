@@ -55,7 +55,7 @@ function saveErrorLog(entry, storageKey = STORAGE_KEY) {
  */
 function reportToBackend(entry) {
   try {
-    const apiBase = import.meta.env.VITE_API_URL || "";
+    const apiBase = import.meta.env.VITE_API_BASE_URL || "";
     fetch(`${apiBase}/api/v1/admin/frontend-diagnostics`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
