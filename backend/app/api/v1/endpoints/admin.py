@@ -3,7 +3,7 @@ Admin dashboard API endpoint.
 Provides platform-wide statistics for the master dashboard.
 Each query is isolated with rollback on failure to prevent cascade errors.
 """
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, Header, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 from loguru import logger
@@ -688,13 +688,15 @@ async def get_video_detail(
 @router.post("/retry-video/{video_id}")
 async def retry_video(
     video_id: str,
+    from_step: Optional[str] = Query(None, description="Resume from specific step, e.g. STEP_12_5_PRODUCT_DETECTION"),
     db: AsyncSession = Depends(get_db),
     x_admin_key: Optional[str] = Header(None),
 ):
     """Re-enqueue a stuck video for processing.
     Supports both standard videos and LiveBoost (live_boost) videos.
     For standard videos: generates a fresh SAS URL and pushes a new job.
-    For LiveBoost videos: creates/resets a LiveAnalysisJob and enqueues live_analysis."""
+    For LiveBoost videos: creates/resets a LiveAnalysisJob and enqueues live_analysis.
+    Optional from_step: resume from a specific pipeline step instead of STEP_0."""
     if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -733,10 +735,29 @@ async def retry_video(
             expires_in_minutes=1440,  # 24 hours
         )
 
-        # Reset status (use STEP_0 instead of 'uploaded' per project rules)
+        # Reset status — use from_step if provided, otherwise STEP_0
+        resume_status = 'STEP_0_EXTRACT_FRAMES'
+        if from_step:
+            # Validate from_step is a known step status
+            valid_steps = [
+                'STEP_0_EXTRACT_FRAMES', 'STEP_1_DETECT_PHASES',
+                'STEP_2_EXTRACT_METRICS', 'STEP_3_TRANSCRIBE_AUDIO',
+                'STEP_4_IMAGE_CAPTION', 'STEP_5_BUILD_PHASE_UNITS',
+                'STEP_6_BUILD_PHASE_DESCRIPTION', 'STEP_7_GROUPING',
+                'STEP_8_UPDATE_BEST_PHASE', 'STEP_9_BUILD_VIDEO_STRUCTURE_FEATURES',
+                'STEP_10_ASSIGN_VIDEO_STRUCTURE_GROUP',
+                'STEP_11_UPDATE_VIDEO_STRUCTURE_GROUP_STATS',
+                'STEP_12_UPDATE_VIDEO_STRUCTURE_BEST',
+                'STEP_12_5_PRODUCT_DETECTION',
+                'STEP_13_BUILD_REPORTS', 'STEP_14_FINALIZE',
+            ]
+            if from_step in valid_steps:
+                resume_status = from_step
+            else:
+                raise HTTPException(status_code=400, detail=f"Invalid from_step: {from_step}. Valid: {valid_steps}")
         await db.execute(
-            text("UPDATE videos SET status = 'STEP_0_EXTRACT_FRAMES', step_progress = 0 WHERE id = :vid"),
-            {"vid": video_id},
+            text("UPDATE videos SET status = :status, step_progress = 0 WHERE id = :vid"),
+            {"vid": video_id, "status": resume_status},
         )
         await db.commit()
 
@@ -751,7 +772,8 @@ async def retry_video(
         return {
             "status": "ok",
             "video_id": video_id,
-            "message": f"Re-enqueued with fresh SAS URL (expires {expiry})",
+            "message": f"Re-enqueued with fresh SAS URL (expires {expiry}), resume_from={resume_status}",
+            "resume_from": resume_status,
         }
     except HTTPException:
         raise

@@ -1618,7 +1618,25 @@ def main():
                     with open(art_path, "w", encoding="utf-8") as f:
                         json.dump(exposures, f, ensure_ascii=False, indent=2)
                 else:
-                    logger.info("[PRODUCT] No product list available, skipping detection")
+                    # Check if Excel product data exists but wasn't loaded
+                    try:
+                        _excel_urls = get_video_excel_urls_sync(video_id)
+                        _has_excel = bool(_excel_urls and _excel_urls.get("excel_product_blob_url"))
+                    except Exception:
+                        _has_excel = False
+                    if _has_excel:
+                        logger.warning(
+                            "[PRODUCT] \u26a0 Excel product data EXISTS in DB but excel_data is empty/missing! "
+                            "This video may need re-processing from STEP_0 to load Excel data. "
+                            "video_id=%s", video_id
+                        )
+                        _record_step_error(
+                            video_id, "STEP_12_5_PRODUCT_DETECTION",
+                            "PRODUCT_DATA_MISMATCH",
+                            Exception("Excel product data exists but was not loaded into pipeline")
+                        )
+                    else:
+                        logger.info("[PRODUCT] No product list available, skipping detection")
             except Exception as e:
                 logger.warning("[STEP12.5] Non-fatal error (continuing): %s", e)
                 _record_step_error(video_id, "STEP_12_5_PRODUCT_DETECTION", "PRODUCT_DETECTION_FAIL", e)
