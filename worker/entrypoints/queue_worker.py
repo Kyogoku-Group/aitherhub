@@ -869,9 +869,11 @@ def _run_live_analysis_job(payload: dict) -> bool:
             cmd, cwd=BATCH_DIR,
             env=env,
             start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
         try:
-            proc.wait(timeout=WORKER_VIDEO_TIMEOUT)
+            stdout_data, _ = proc.communicate(timeout=WORKER_VIDEO_TIMEOUT)
         except subprocess.TimeoutExpired:
             print(f"[worker] Live analysis timeout — killing pid={proc.pid}")
             try:
@@ -888,6 +890,12 @@ def _run_live_analysis_job(payload: dict) -> bool:
         if metrics:
             metrics.end_phase("processing")
 
+        # Log subprocess output for debugging
+        output = stdout_data.decode("utf-8", errors="replace") if stdout_data else ""
+        if output:
+            for line in output.strip().split("\n")[-30:]:
+                print(f"[worker][live_analysis][{job_id}] {line}")
+
         if proc.returncode == 0:
             print(f"[worker] Live analysis completed: job={job_id}")
             if metrics:
@@ -899,9 +907,11 @@ def _run_live_analysis_job(payload: dict) -> bool:
                 metrics.finish(status="skipped")
             return True
         else:
+            # Log last 5 lines of output for error diagnosis
+            tail = "\n".join(output.strip().split("\n")[-5:]) if output else "no output"
             log_error_type(
                 job_id, "live_analysis", "SUBPROCESS_FAIL",
-                f"exit={proc.returncode}",
+                f"exit={proc.returncode} tail={tail}",
             )
             if metrics:
                 metrics.finish(status="failed")
