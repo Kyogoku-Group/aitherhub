@@ -3088,3 +3088,64 @@ async def deactivate_lesson(
         await db.rollback()
         logger.exception(f"Failed to deactivate lesson: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ──────────────────────────────────────────────
+# List blobs for a video (debug / admin)
+# ──────────────────────────────────────────────
+@router.get("/list-blobs/{video_id}")
+async def list_blobs_for_video(
+    video_id: str,
+    db: AsyncSession = Depends(get_db),
+    x_admin_key: Optional[str] = Header(None),
+):
+    """List all blobs in Azure Storage for a given video_id.
+    Useful for debugging chunk upload issues."""
+    if x_admin_key != f"{ADMIN_ID}:{ADMIN_PASS}":
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        from azure.storage.blob import BlobServiceClient
+        import os
+
+        conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+        container_name = os.getenv("AZURE_BLOB_CONTAINER", "videos")
+        if not conn_str:
+            raise HTTPException(status_code=500, detail="No storage connection string")
+
+        # Get email for this video
+        result = await db.execute(
+            text("SELECT u.email FROM videos v JOIN users u ON v.user_id = u.id WHERE v.id = :vid"),
+            {"vid": video_id},
+        )
+        row = result.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Video not found")
+
+        email = row[0]
+        prefix = f"{email}/{video_id}/"
+
+        service_client = BlobServiceClient.from_connection_string(conn_str)
+        container_client = service_client.get_container_client(container_name)
+
+        blobs = []
+        for blob in container_client.list_blobs(name_starts_with=prefix):
+            blobs.append({
+                "name": blob.name,
+                "size": blob.size,
+                "last_modified": str(blob.last_modified) if blob.last_modified else None,
+                "content_type": blob.content_settings.content_type if blob.content_settings else None,
+            })
+
+        return {
+            "video_id": video_id,
+            "email": email,
+            "prefix": prefix,
+            "blob_count": len(blobs),
+            "blobs": blobs,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to list blobs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
