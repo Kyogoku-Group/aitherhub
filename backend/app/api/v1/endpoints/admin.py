@@ -1938,7 +1938,8 @@ async def recalc_csv_metrics(
             slot_end = max(slot_start + 1800, video_end_abs)
         csv_slots.append({"start": slot_start, "end": slot_end, "entry": te["entry"]})
 
-    logs.append(f"CSV slots: {[(f'{s[\"start\"]:.0f}-{s[\"end\"]:.0f}') for s in csv_slots]}")
+    slot_strs = [f"{s['start']:.0f}-{s['end']:.0f}" for s in csv_slots]
+    logs.append(f"CSV slots: {slot_strs}")
 
     # Step 7: Calculate metrics for each phase
     updates = []
