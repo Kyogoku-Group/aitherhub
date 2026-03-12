@@ -34,6 +34,12 @@ _TEMP_DIRS = {
         "pattern": "files",          # contains individual files
         "max_age_hours": 6,
     },
+    "/tmp/aitherhub": {
+        "description": "Temp working directory for pipeline jobs",
+        "pattern": "subdirs",
+        "heavy_subdirs": None,       # remove entire subdir
+        "max_age_hours": 3,
+    },
     "output": {
         "description": "Per-video output artifacts (frames, audio, cache)",
         "pattern": "subdirs",        # contains {video_id}/ subdirectories
