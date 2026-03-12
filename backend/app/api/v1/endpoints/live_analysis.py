@@ -6,11 +6,18 @@ These endpoints handle the lifecycle of live-stream analysis jobs:
   - Poll analysis status
   - Generate per-chunk signed upload URLs
 
+BUILD 29: Root-cause fixes
+  - Unified transaction for Job + Video creation (no partial state)
+  - Status API returns graceful "pending" instead of 404 when job not yet created
+  - Start API checks response status so iOS can detect enqueue failures
+  - Retry endpoint for failed jobs
+
 ╔══════════════════════════════════════════════════════════════════╗
 ║  Routes:                                                        ║
 ║    POST /api/v1/live-analysis/start                              ║
 ║    GET  /api/v1/live-analysis/status/{video_id}                  ║
 ║    POST /api/v1/live-analysis/generate-chunk-upload-url          ║
+║    POST /api/v1/live-analysis/retry/{video_id}                   ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -76,27 +83,24 @@ async def _ensure_video_record(
     db: AsyncSession,
     video_id: str,
     user_id: int,
-    status_value: str = "pending",
+    status_value: str = "uploaded",
 ) -> None:
     """
-    BUILD 28: Ensure a corresponding record exists in the `videos` table
+    Ensure a corresponding record exists in the `videos` table
     so that LiveBoost sessions appear in AitherHub's History view.
 
-    The History API (`/videos/user/{id}/with-clips`) queries the `videos`
-    table, so LiveBoost sessions must have a record there to be visible.
-
-    Uses INSERT ... ON DUPLICATE KEY UPDATE to be idempotent.
+    Uses check-then-insert to be idempotent. Non-critical — failures
+    are logged but do not block the analysis pipeline.
     """
     try:
-        # Check if record already exists
         result = await db.execute(
             select(Video).where(Video.id == uuid_module.UUID(video_id))
         )
         existing = result.scalar_one_or_none()
 
         if existing:
-            # Update status if it's being retried (failed → pending)
-            if existing.status == "ERROR" and status_value == "pending":
+            # Update status if it's being retried (ERROR → uploaded)
+            if existing.status in ("ERROR", "failed") and status_value in ("uploaded", "pending"):
                 existing.status = "uploaded"
                 existing.step_progress = 0
                 await db.flush()
@@ -105,7 +109,6 @@ async def _ensure_video_record(
                     f"video={video_id} status=uploaded"
                 )
         else:
-            # Create new record
             video = Video(
                 id=uuid_module.UUID(video_id),
                 user_id=user_id,
@@ -137,18 +140,17 @@ async def start_live_analysis(
     """
     Trigger the analysis pipeline after all chunks have been uploaded.
 
-    This endpoint:
-      1. Creates a LiveAnalysisJob record (status=pending)
-      2. Creates/updates a Video record in the videos table (for History view)
-      3. Enqueues a worker job for the analysis pipeline
-      4. Returns the job ID for status polling
-
-    Called by the LiveBoost iOS app after ChunkUploadService
-    confirms all chunks are uploaded.
+    BUILD 29: Unified transaction — Job + Video created in single commit.
+    Response status reflects actual enqueue result so iOS can detect failures.
     """
     try:
         user_id = current_user["id"]
         video_id = payload.video_id
+
+        logger.info(
+            f"[live-analysis/start] Received: video={video_id} user={user_id} "
+            f"chunks={payload.total_chunks} source={payload.stream_source}"
+        )
 
         # Check for duplicate: prevent re-triggering for same video_id
         existing = await db.execute(
@@ -158,9 +160,13 @@ async def start_live_analysis(
             )
         )
         existing_job = existing.scalar_one_or_none()
+
         if existing_job:
-            # If already exists and not failed, return existing job
             if existing_job.status not in ("failed",):
+                logger.info(
+                    f"[live-analysis/start] Job already exists: {existing_job.id} "
+                    f"status={existing_job.status}"
+                )
                 return LiveAnalysisStartResponse(
                     job_id=str(existing_job.id),
                     video_id=video_id,
@@ -176,13 +182,15 @@ async def start_live_analysis(
                 existing_job.started_at = None
                 existing_job.completed_at = None
                 existing_job.results = None
-                await db.commit()
-                await db.refresh(existing_job)
                 job = existing_job
 
-                # BUILD 28: Also reset the videos table record for retry
-                await _ensure_video_record(db, video_id, user_id, "pending")
+                # Also reset the videos table record
+                await _ensure_video_record(db, video_id, user_id, "uploaded")
+
+                # Single commit for both resets
                 await db.commit()
+                await db.refresh(job)
+                logger.info(f"[live-analysis/start] Reset failed job: {job.id}")
         else:
             # Create new job
             job = LiveAnalysisJob(
@@ -196,11 +204,13 @@ async def start_live_analysis(
             )
             db.add(job)
 
-            # BUILD 28: Also create a record in the videos table
+            # Also create a record in the videos table
             await _ensure_video_record(db, video_id, user_id, "uploaded")
 
+            # Single commit for both creates
             await db.commit()
             await db.refresh(job)
+            logger.info(f"[live-analysis/start] Created new job: {job.id}")
 
         # Enqueue worker job
         queue_payload = {
@@ -228,7 +238,7 @@ async def start_live_analysis(
                     )
                 )
                 logger.info(
-                    f"[live-analysis] Enqueued OK job={job.id} video={video_id} "
+                    f"[live-analysis/start] Enqueued OK job={job.id} video={video_id} "
                     f"msg_id={enqueue_result.message_id}"
                 )
             else:
@@ -240,7 +250,7 @@ async def start_live_analysis(
                         error_message=f"Failed to enqueue: {enqueue_result.error}",
                     )
                 )
-                # BUILD 28: Also update videos table on enqueue failure
+                # Also update videos table on enqueue failure
                 try:
                     await db.execute(
                         text("""
@@ -253,20 +263,23 @@ async def start_live_analysis(
                 except Exception:
                     pass
                 logger.error(
-                    f"[live-analysis] Enqueue FAILED job={job.id} error={enqueue_result.error}"
+                    f"[live-analysis/start] Enqueue FAILED job={job.id} "
+                    f"error={enqueue_result.error}"
                 )
             await db.commit()
         except Exception as db_err:
-            logger.error(f"[live-analysis] Failed to save enqueue evidence: {db_err}")
+            logger.error(f"[live-analysis/start] Failed to save enqueue evidence: {db_err}")
             try:
                 await db.rollback()
             except Exception as _e:
                 logger.debug(f"Non-critical error suppressed: {_e}")
 
+        # BUILD 29: Return actual status so iOS can detect failures
+        final_status = "pending" if enqueue_result.success else "failed"
         return LiveAnalysisStartResponse(
             job_id=str(job.id),
             video_id=video_id,
-            status="pending" if enqueue_result.success else "failed",
+            status=final_status,
             message=(
                 "Analysis pipeline started"
                 if enqueue_result.success
@@ -296,8 +309,10 @@ async def get_analysis_status(
     """
     Poll the current status of a live analysis job.
 
-    Returns the job status, current processing step, progress percentage,
-    and results (when completed).
+    BUILD 29: Instead of returning 404 when no job exists, returns a
+    graceful "pending" status if a video record exists. This prevents
+    the iOS app from showing 0% indefinitely when the /start call
+    succeeded but the job hasn't been picked up yet.
     """
     try:
         user_id = current_user["id"]
@@ -311,6 +326,36 @@ async def get_analysis_status(
         job = result.scalar_one_or_none()
 
         if not job:
+            # BUILD 29: Check if a video record exists (job may not have been
+            # created yet, e.g. during server restart or deploy)
+            video_result = await db.execute(
+                select(Video).where(
+                    Video.id == uuid_module.UUID(video_id),
+                    Video.user_id == user_id,
+                )
+            )
+            video = video_result.scalar_one_or_none()
+
+            if video and video.upload_type == "live_boost":
+                # Video exists but job doesn't — return "waiting" status
+                # so iOS shows a meaningful message instead of 0%
+                logger.warning(
+                    f"[live-analysis/status] No job but video exists: "
+                    f"video={video_id} video_status={video.status}"
+                )
+                return LiveAnalysisStatusResponse(
+                    job_id="",
+                    video_id=video_id,
+                    status="waiting",
+                    current_step="解析ジョブを準備中...",
+                    progress=0.0,
+                    started_at=None,
+                    completed_at=None,
+                    results=None,
+                    error_message=None,
+                )
+
+            # Neither job nor video exists
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"No analysis job found for video_id={video_id}",
@@ -400,4 +445,121 @@ async def generate_chunk_upload_url(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate chunk upload URL: {exc}",
+        )
+
+
+# ──────────────────────────────────────────────
+# 4. Retry Analysis (BUILD 29)
+# ──────────────────────────────────────────────
+@router.post("/retry/{video_id}", response_model=LiveAnalysisStartResponse)
+async def retry_analysis(
+    video_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    BUILD 29: Retry a failed or stuck analysis job.
+
+    This endpoint:
+      1. Finds the existing job (or creates one if missing)
+      2. Resets it to pending
+      3. Re-enqueues the worker job
+
+    Can be called from the iOS History screen or the Web UI.
+    """
+    try:
+        user_id = current_user["id"]
+
+        # Find existing job
+        result = await db.execute(
+            select(LiveAnalysisJob).where(
+                LiveAnalysisJob.video_id == video_id,
+                LiveAnalysisJob.user_id == user_id,
+            )
+        )
+        job = result.scalar_one_or_none()
+
+        if job:
+            # Reset the job
+            job.status = "pending"
+            job.current_step = None
+            job.progress = 0
+            job.error_message = None
+            job.started_at = None
+            job.completed_at = None
+            job.results = None
+        else:
+            # No job exists — create one (handles the case where /start
+            # failed to create the job but video record exists)
+            job = LiveAnalysisJob(
+                id=uuid_module.uuid4(),
+                video_id=video_id,
+                user_id=user_id,
+                stream_source="tiktok_live",
+                status="pending",
+                progress=0,
+            )
+            db.add(job)
+
+        # Reset video record too
+        await _ensure_video_record(db, video_id, user_id, "uploaded")
+        await db.commit()
+        await db.refresh(job)
+
+        # Re-enqueue
+        queue_payload = {
+            "job_type": "live_analysis",
+            "job_id": str(job.id),
+            "video_id": video_id,
+            "user_id": user_id,
+            "stream_source": job.stream_source or "tiktok_live",
+            "total_chunks": job.total_chunks,
+            "email": current_user.get("email", ""),
+        }
+
+        enqueue_result = await enqueue_job(queue_payload)
+
+        if enqueue_result.success:
+            await db.execute(
+                update(LiveAnalysisJob)
+                .where(LiveAnalysisJob.id == job.id)
+                .values(
+                    queue_message_id=enqueue_result.message_id,
+                    queue_enqueued_at=enqueue_result.enqueued_at,
+                    started_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+            logger.info(f"[live-analysis/retry] Re-enqueued job={job.id} video={video_id}")
+        else:
+            await db.execute(
+                update(LiveAnalysisJob)
+                .where(LiveAnalysisJob.id == job.id)
+                .values(
+                    status="failed",
+                    error_message=f"Retry enqueue failed: {enqueue_result.error}",
+                )
+            )
+            await db.commit()
+            logger.error(f"[live-analysis/retry] Enqueue failed: {enqueue_result.error}")
+
+        final_status = "pending" if enqueue_result.success else "failed"
+        return LiveAnalysisStartResponse(
+            job_id=str(job.id),
+            video_id=video_id,
+            status=final_status,
+            message=(
+                "Analysis retry started"
+                if enqueue_result.success
+                else f"Retry failed: {enqueue_result.error}"
+            ),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"[live-analysis/retry] Unexpected error: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retry analysis: {exc}",
         )
