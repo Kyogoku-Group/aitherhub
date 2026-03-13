@@ -158,6 +158,16 @@ curl -sf -X POST -H "X-Admin-Key: aither:hub" -H "Content-Type: application/json
 
 ---
 
+## Known Lessons
+
+| Date | Category | Lesson |
+|------|----------|--------|
+| 2026-03-13 | Frontend/JSX | JSX text content does NOT interpret `\uXXXX` Unicode escapes. Use `{'\u2728'}` (JS expression) or actual Unicode chars instead. JS string literals in props/variables DO work correctly. |
+| 2026-03-13 | Frontend/Loading | Always add safety timeouts to API-dependent loading states to prevent infinite spinners. |
+| 2026-03-13 | Backend/Decorator | Empty `@router.post()` decorator without path causes import errors — always specify path. |
+
+---
+
 ## Absolute Rules
 
 - NEVER reset DONE/COMPLETED video status — all analysis data will be lost
