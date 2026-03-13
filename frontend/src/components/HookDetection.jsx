@@ -186,7 +186,7 @@ export default function HookDetection({ videoData, onSelectHook }) {
                     <div className="flex-1">
                       {/* フレーズテキスト */}
                       <p className="text-sm font-bold leading-relaxed">
-                        「{hook.text}」
+                        「{hook.text.length > 60 ? hook.text.slice(0, 60) + '...' : hook.text}」
                       </p>
 
                       {/* 時間 + 理由タグ */}

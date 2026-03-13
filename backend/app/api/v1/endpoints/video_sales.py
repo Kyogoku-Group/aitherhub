@@ -874,6 +874,7 @@ async def get_sales_moment_clips(
                 "user_id": user_id,
             })
             phase_rows = phases_result.fetchall()
+            phases = [dict(row._mapping) for row in phase_rows]
         except Exception:
             # Fallback: query without sales metric columns
             await db.rollback()
@@ -894,20 +895,17 @@ async def get_sales_moment_clips(
             })
             phase_rows = phases_result.fetchall()
             # Add default values for missing columns
-            phase_rows = [
-                type(row, (), {**dict(row._mapping), "gmv": 0, "order_count": 0, "viewer_count": 0, "product_clicks": 0})
-                if not hasattr(row, 'gmv') else row
+            phases = [
+                {**dict(row._mapping), "gmv": 0, "order_count": 0, "viewer_count": 0, "product_clicks": 0}
                 for row in phase_rows
             ]
 
-        if not phase_rows:
+        if not phases:
             return {
                 "video_id": video_id,
                 "spike_count": 0,
                 "candidates": [],
             }
-
-        phases = [dict(row._mapping) for row in phase_rows]
 
         # 動画の総秒数（duration カラムが存在しない場合は video_phases から計算）
         try:
@@ -1043,27 +1041,40 @@ async def detect_hooks_for_video(
 
             # audio_text を文に分割
             import re as _re
-            sentences = _re.split(r'[。！？\n]', str(audio_text))
+            raw_text = str(audio_text).strip()
+            sentences = _re.split(r'[。！？!?\n]', raw_text)
             sentences = [s.strip() for s in sentences if s.strip()]
 
-            if not sentences:
+            # 句読点がなく分割できなかった場合、スペース・読点・助詞区切りで再分割
+            if len(sentences) <= 1 and len(raw_text) > 80:
+                # まず読点「、」で分割を試みる
+                sentences = _re.split(r'[、,]', raw_text)
+                sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 3]
+
+            # それでも長すぎる場合、約50文字ごとに分割
+            final_sentences = []
+            for sent in (sentences if sentences else [raw_text]):
+                if len(sent) > 80:
+                    # 50文字ごとに分割
+                    for j in range(0, len(sent), 50):
+                        chunk = sent[j:j+50].strip()
+                        if chunk:
+                            final_sentences.append(chunk)
+                else:
+                    final_sentences.append(sent)
+            sentences = final_sentences if final_sentences else [raw_text]
+
+            # 均等に時間を割り当て
+            duration = t_end - t_start
+            per_sentence = duration / len(sentences) if sentences else duration
+            for i, sent in enumerate(sentences):
+                seg_start = t_start + i * per_sentence
+                seg_end = seg_start + per_sentence
                 segments.append({
-                    "start": t_start,
-                    "end": t_end,
-                    "text": str(audio_text).strip(),
+                    "start": seg_start,
+                    "end": seg_end,
+                    "text": sent,
                 })
-            else:
-                # 均等に時間を割り当て
-                duration = t_end - t_start
-                per_sentence = duration / len(sentences) if sentences else duration
-                for i, sent in enumerate(sentences):
-                    seg_start = t_start + i * per_sentence
-                    seg_end = seg_start + per_sentence
-                    segments.append({
-                        "start": seg_start,
-                        "end": seg_end,
-                        "text": sent,
-                    })
 
         if not segments:
             return {
@@ -1177,10 +1188,24 @@ MOMENT_CATEGORIES = {
         "padding_after": 15.0,
         "priority": 7,
     },
+    "strong": {
+        "label": "Strong Sales Moments",
+        "icon": "trending_up",
+        "description": "売上が大きく伸びた瞬間（CSV売上データ検出）",
+        "padding_before": 20.0,
+        "padding_after": 20.0,
+        "priority": 0,
+    },
+    "weak": {
+        "label": "Weak Sales Signals",
+        "icon": "show_chart",
+        "description": "売上の小さな動きが検出された瞬間",
+        "padding_before": 15.0,
+        "padding_after": 15.0,
+        "priority": 8,
+    },
 }
 
-
-@router.get("/{video_id}/moment-clips")
 
 @router.get("/{video_id}/moment-clips")
 async def get_moment_clips(

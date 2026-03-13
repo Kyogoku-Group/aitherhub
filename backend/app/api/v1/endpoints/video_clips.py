@@ -539,12 +539,6 @@ async def update_clip_captions(
 
 
 # =========================
-# Sales Moment Clip API
-# =========================
-
-@router.get("/{video_id}/sales-moment-clips")
-
-# =========================
 # Subtitle Feedback & Style API
 # =========================
 
