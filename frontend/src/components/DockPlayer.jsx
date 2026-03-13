@@ -131,6 +131,14 @@ export default function DockPlayer({
   const [usingFullVideo, setUsingFullVideo] = useState(!isClipPreview);
   const [navDisabled, setNavDisabled] = useState(false); // Temporary disable during video switch
 
+  // ── Helper: append #t= media fragment to URL for browser seek hint ──
+  const appendTimeFragment = useCallback((url, t) => {
+    if (!url || !t || t <= 0) return url;
+    // Strip existing fragment
+    const base = url.split('#')[0];
+    return `${base}#t=${Math.floor(t)}`;
+  }, []);
+
   // Sync activeVideoUrl when parent changes videoUrl (new phase opened from outside)
   // BUT: if we already switched to full video, don't revert to clip URL
   useEffect(() => {
@@ -141,10 +149,14 @@ export default function DockPlayer({
         return true;
       }
       // Not yet on full video — follow parent's URL
-      setActiveVideoUrl(videoUrl);
+      // Add time fragment for non-clip videos to help browser seek
+      const url = (!isClipPreview && timeStart > 0)
+        ? appendTimeFragment(videoUrl, timeStart)
+        : videoUrl;
+      setActiveVideoUrl(url);
       return !isClipPreview;
     });
-  }, [videoUrl, isClipPreview]);
+  }, [videoUrl, isClipPreview, timeStart, appendTimeFragment]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [showCustomLoading, setShowCustomLoading] = useState(true);
@@ -186,8 +198,9 @@ export default function DockPlayer({
 
     // Try fallback URLs in order: fullVideoUrl > preview_url > getDownloadUrl
     const fallbacks = [];
-    if (fullVideoUrl && fullVideoUrl !== activeVideoUrl) fallbacks.push(fullVideoUrl);
-    if (videoData?.preview_url && videoData.preview_url !== activeVideoUrl) fallbacks.push(videoData.preview_url);
+    const baseActive = (activeVideoUrl || '').split('#')[0];
+    if (fullVideoUrl && fullVideoUrl.split('#')[0] !== baseActive) fallbacks.push(fullVideoUrl);
+    if (videoData?.preview_url && videoData.preview_url.split('#')[0] !== baseActive) fallbacks.push(videoData.preview_url);
 
     for (const fb of fallbacks) {
       console.log('DockPlayer: trying fallback URL:', fb);
@@ -295,7 +308,11 @@ export default function DockPlayer({
     if (open) {
       // Sync activeVideoUrl when DockPlayer opens (videoUrl may have changed while closed)
       if (videoUrl) {
-        setActiveVideoUrl(videoUrl);
+        // Add time fragment for non-clip full videos to speed up initial seek
+        const url = (!isClipPreview && timeStart > 0)
+          ? appendTimeFragment(videoUrl, timeStart)
+          : videoUrl;
+        setActiveVideoUrl(url);
         setUsingFullVideo(!isClipPreview);
       }
       return;
@@ -360,14 +377,14 @@ export default function DockPlayer({
         setCurrentPhaseIndex(findPhaseIndex(timeStart));
 
         await new Promise((resolve) => {
-          const timeout = setTimeout(resolve, 5000);
+          const timeout = setTimeout(resolve, 2000);
           const check = () => {
-            if (!vid || vid.readyState >= 4) {
+            if (!vid || vid.readyState >= 2) {
               clearTimeout(timeout);
               resolve();
               return;
             }
-            setTimeout(check, 200);
+            setTimeout(check, 100);
           };
           check();
         });
@@ -399,7 +416,7 @@ export default function DockPlayer({
       vid.removeEventListener("canplay", handleCanPlay);
     };
 
-    if (vid.readyState >= 3) {
+    if (vid.readyState >= 2) {
       seekAndPlay();
     } else {
       vid.addEventListener("canplay", handleCanPlay);
@@ -553,12 +570,15 @@ export default function DockPlayer({
       setCurrentPhaseIndex(targetIdx);
 
       // Determine if we need to switch from clip to full video
-      const needsSwitch = !usingFullVideo && fullVideoUrl && fullVideoUrl !== activeVideoUrl;
+      // Compare base URLs without time fragments (#t=...)
+      const baseActive = (activeVideoUrl || '').split('#')[0];
+      const baseFull = (fullVideoUrl || '').split('#')[0];
+      const needsSwitch = !usingFullVideo && fullVideoUrl && baseFull !== baseActive;
 
       if (needsSwitch) {
         // Switch to full video: disable nav buttons temporarily
         setNavDisabled(true);
-        setActiveVideoUrl(fullVideoUrl);
+        setActiveVideoUrl(appendTimeFragment(fullVideoUrl, targetTime));
         setUsingFullVideo(true);
 
         // After video element loads new src, seek to target
@@ -625,7 +645,7 @@ export default function DockPlayer({
         onPhaseNavigate(targetPhase);
       }
     },
-    [currentPhaseIndex, reports1, onPhaseNavigate, navDisabled, usingFullVideo, fullVideoUrl, activeVideoUrl, playbackRate]
+    [currentPhaseIndex, reports1, onPhaseNavigate, navDisabled, usingFullVideo, fullVideoUrl, activeVideoUrl, playbackRate, appendTimeFragment]
   );
 
   // ── Auto-save function (debounced) ──────────────────────────
@@ -700,7 +720,7 @@ export default function DockPlayer({
           onClick={() => setIsMinimized(false)}
         >
           <div className="w-8 h-8 rounded-lg overflow-hidden bg-gray-800 flex-shrink-0">
-            <video ref={videoRef} src={activeVideoUrl} className="w-full h-full object-cover" muted />
+            <video ref={videoRef} src={activeVideoUrl} className="w-full h-full object-cover" muted preload="none" />
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-xs text-white/80 truncate">
@@ -786,7 +806,7 @@ export default function DockPlayer({
                 controls
                 autoPlay
                 playsInline
-                preload="auto"
+                preload="metadata"
                 className="h-full object-contain"
                 style={{
                   maxHeight: "calc(100vh - 100px)",
