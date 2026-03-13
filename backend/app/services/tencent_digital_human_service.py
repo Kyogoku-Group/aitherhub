@@ -2,8 +2,8 @@
 Tencent Cloud Digital Human (數智人) Livestream Service
 
 This module provides a Python client for the Tencent Cloud IVH (Intelligent Virtual Human)
-Livestream aPaaS API. It handles authentication (HMAC-SHA256 signing), and wraps all five
-core livestream endpoints:
+Livestream aPaaS API (v5.x.x protocol). It handles authentication (HMAC-SHA256 signing),
+and wraps all core livestream endpoints:
 
   1. open_liveroom   – Create a new livestream room with scripts
   2. get_liveroom    – Query livestream room status
@@ -14,7 +14,13 @@ core livestream endpoints:
 Architecture note:
   This is a PoC integration module. Tencent Cloud credentials (appkey, access_token)
   are loaded from environment variables. In production, these should be stored in
-  a secure vault (e.g., Azure Key Vault) and rotated periodically.
+  a secure vault and rotated periodically.
+
+v5.x.x Protocol Notes:
+  - Base URL: https://gw.tvs.qq.com
+  - Auth: HMAC-SHA256 signature with appkey + timestamp
+  - List API uses PageIndex (1-based) + PageSize
+  - All requests use Header/Payload envelope
 
 Reference:
   https://cloud.tencent.com/document/product/1240/112139
@@ -30,14 +36,14 @@ import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
-# Configuration
+# Configuration (v5.x.x protocol)
 # ──────────────────────────────────────────────
 
 TENCENT_IVH_BASE_URL = os.getenv("TENCENT_IVH_BASE_URL", "https://gw.tvs.qq.com")
@@ -94,22 +100,31 @@ class ScriptReq:
 
 
 class SpeechParam:
-    """Voice parameters for the digital human."""
+    """
+    Voice parameters for the digital human.
+
+    For custom voice (声音复刻), set timbre_key to the cloned voice ID
+    obtained from the Tencent IVH voice cloning service.
+    """
 
     def __init__(
         self,
         speed: float = 1.0,
         timbre_key: Optional[str] = None,
         volume: int = 0,
+        pitch: float = 0.0,
     ):
         self.speed = speed
         self.timbre_key = timbre_key
         self.volume = volume
+        self.pitch = pitch
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {"Speed": self.speed, "Volume": self.volume}
         if self.timbre_key:
             d["TimbreKey"] = self.timbre_key
+        if self.pitch != 0.0:
+            d["Pitch"] = self.pitch
         return d
 
 
@@ -150,15 +165,15 @@ LIVEROOM_STATUS = {
 
 
 # ──────────────────────────────────────────────
-# Signing Utilities
+# Signing Utilities (v5.x.x)
 # ──────────────────────────────────────────────
 
 def _generate_signature(params: Dict[str, str], access_token: str) -> str:
     """
-    Generate HMAC-SHA256 signature for Tencent IVH aPaaS API.
+    Generate HMAC-SHA256 signature for Tencent IVH aPaaS API (v5.x.x).
 
     Steps:
-      1. Sort params by key (dict order)
+      1. Sort params by key (alphabetical)
       2. Build signing string: key1=val1&key2=val2
       3. HMAC-SHA256 with access_token as key
       4. Base64 encode
@@ -175,7 +190,12 @@ def _generate_signature(params: Dict[str, str], access_token: str) -> str:
     return quote(signature_b64, safe="")
 
 
-def _build_signed_url(path: str, appkey: str, access_token: str) -> str:
+def _build_signed_url(
+    path: str,
+    appkey: str,
+    access_token: str,
+    base_url: str = TENCENT_IVH_BASE_URL,
+) -> str:
     """Build a fully signed URL for the given API path."""
     timestamp = str(int(time.time()))
     params = {
@@ -184,7 +204,7 @@ def _build_signed_url(path: str, appkey: str, access_token: str) -> str:
     }
     signature = _generate_signature(params, access_token)
     query_string = f"appkey={appkey}&timestamp={timestamp}&signature={signature}"
-    return f"{TENCENT_IVH_BASE_URL}{path}?{query_string}"
+    return f"{base_url}{path}?{query_string}"
 
 
 # ──────────────────────────────────────────────
@@ -193,7 +213,7 @@ def _build_signed_url(path: str, appkey: str, access_token: str) -> str:
 
 class TencentDigitalHumanService:
     """
-    Client for the Tencent Cloud IVH Livestream aPaaS API.
+    Client for the Tencent Cloud IVH Livestream aPaaS API (v5.x.x protocol).
 
     Usage:
         service = TencentDigitalHumanService()
@@ -221,7 +241,7 @@ class TencentDigitalHumanService:
             )
 
     def _signed_url(self, path: str) -> str:
-        return _build_signed_url(path, self.appkey, self.access_token)
+        return _build_signed_url(path, self.appkey, self.access_token, self.base_url)
 
     @staticmethod
     def _gen_req_id() -> str:
@@ -246,7 +266,7 @@ class TencentDigitalHumanService:
 
         if response.status_code != 200:
             logger.error(
-                f"Tencent IVH API error: status={response.status_code}, "
+                f"Tencent IVH API HTTP error: status={response.status_code}, "
                 f"body={response.text}"
             )
             raise TencentAPIError(
@@ -259,7 +279,10 @@ class TencentDigitalHumanService:
         code = header.get("Code", -1)
         if code != 0:
             msg = header.get("Message", "Unknown error")
-            logger.error(f"Tencent IVH API business error: code={code}, message={msg}")
+            logger.error(
+                f"Tencent IVH API business error: code={code}, message={msg}, "
+                f"path={path}"
+            )
             raise TencentAPIError(f"Business error {code}: {msg}", code=code)
 
         return data.get("Payload", {})
@@ -280,6 +303,15 @@ class TencentDigitalHumanService:
     ) -> Dict[str, Any]:
         """
         Create a new livestream room with the given scripts.
+
+        Args:
+            scripts: List of ScriptReq objects (台本)
+            cycle_times: Number of script loop cycles (0-500, default 5)
+            callback_url: Webhook URL for status change notifications
+            virtualman_project_id: Override project ID
+            protocol: Stream protocol (rtmp/trtc/webrtc)
+            speech_param: Voice parameters (speed, timbre_key for 声音复刻, volume)
+            anchor_param: Digital human position/scale
 
         Returns:
             dict with keys: LiveRoomId, Status, ReqId, VideoStreamPlayUrl (when ready)
@@ -313,7 +345,7 @@ class TencentDigitalHumanService:
         )
         logger.info(
             f"Liveroom created: id={result.get('LiveRoomId')}, "
-            f"status={result.get('Status')}"
+            f"status={result.get('Status')}, req_id={req_id}"
         )
         return result
 
@@ -340,16 +372,34 @@ class TencentDigitalHumanService:
 
     # ──────────────────────────────────────────
     # 3. List Liverooms (查詢直播間列表)
+    #    v5.x.x: uses PageIndex (1-based) + PageSize
     # ──────────────────────────────────────────
 
-    async def list_liverooms(self) -> Dict[str, Any]:
+    async def list_liverooms(
+        self,
+        page_size: int = 20,
+        page_index: int = 1,
+    ) -> Dict[str, Any]:
         """
         List all active (non-closed) livestream rooms for this appkey.
+
+        Args:
+            page_size: Number of rooms per page (1-1000, default 20)
+            page_index: Page number, 1-based (default 1)
         """
+        if page_size < 1 or page_size > 1000:
+            raise ValueError(f"PageSize must be 1-1000, got {page_size}")
+        if page_index < 1:
+            raise ValueError(f"PageIndex must be >= 1, got {page_index}")
+
         req_id = self._gen_req_id()
         result = await self._post(
             "/v2/ivh/liveroom/liveroomservice/listliveroomofappkey",
-            {"ReqId": req_id},
+            {
+                "ReqId": req_id,
+                "PageSize": page_size,
+                "PageIndex": page_index,
+            },
         )
         return result
 
@@ -449,6 +499,29 @@ class TencentDigitalHumanService:
                 f"elapsed={elapsed:.1f}s/{max_wait_seconds}s"
             )
             await asyncio.sleep(poll_interval)
+
+    # ──────────────────────────────────────────
+    # Health check: verify credentials
+    # ──────────────────────────────────────────
+
+    async def health_check(self) -> Dict[str, Any]:
+        """
+        Quick health check by listing liverooms.
+        Returns the API response or raises on failure.
+        """
+        try:
+            result = await self.list_liverooms(page_size=1, page_index=1)
+            return {
+                "status": "ok",
+                "appkey": self.appkey[:8] + "...",
+                "total_rooms": result.get("TotalCount", 0),
+            }
+        except TencentAPIError as e:
+            return {
+                "status": "error",
+                "appkey": self.appkey[:8] + "..." if self.appkey else "NOT_SET",
+                "error": str(e),
+            }
 
 
 # ──────────────────────────────────────────────

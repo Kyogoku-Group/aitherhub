@@ -153,6 +153,7 @@ async def create_liveroom(
                 speed=req.speech_param.speed,
                 timbre_key=req.speech_param.timbre_key,
                 volume=req.speech_param.volume,
+                pitch=req.speech_param.pitch,
             )
 
         anchor_param = None
@@ -239,12 +240,17 @@ async def get_liveroom(
     summary="List all active livestream rooms",
 )
 async def list_liverooms(
+    page_size: int = 20,
+    page_index: int = 1,
     _auth: bool = Depends(verify_admin_key),
 ):
     service = get_tencent_service()
 
     try:
-        result = await service.list_liverooms()
+        result = await service.list_liverooms(
+            page_size=page_size,
+            page_index=page_index,
+        )
         liverooms = result.get("LiveRoomList", [])
         return ListLiveroomsResponse(success=True, liverooms=liverooms)
     except TencentAPIError as e:

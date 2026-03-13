@@ -3,8 +3,10 @@ Tests for the Tencent Digital Human (數智人) Livestream integration.
 
 These tests verify:
   1. HMAC-SHA256 signature generation matches Tencent's documented examples
-  2. Service class correctly builds API payloads
+  2. Service class correctly builds API payloads (v5.x.x protocol)
   3. Script generator scoring and fallback logic
+  4. Schema validation
+  5. Health check functionality
 """
 
 import hashlib
@@ -95,6 +97,20 @@ def test_build_signed_url():
     assert "signature=" in url
 
 
+def test_build_signed_url_custom_base():
+    """Verify custom base URL works."""
+    from app.services.tencent_digital_human_service import _build_signed_url
+
+    url = _build_signed_url(
+        "/v2/ivh/test",
+        "test_appkey",
+        "test_token",
+        base_url="https://custom.example.com",
+    )
+
+    assert url.startswith("https://custom.example.com/v2/ivh/test?")
+
+
 # ──────────────────────────────────────────────
 # Test 3: Data Classes
 # ──────────────────────────────────────────────
@@ -134,7 +150,7 @@ def test_video_layer_to_dict():
 
 
 def test_speech_param_to_dict():
-    """Verify SpeechParam serialization."""
+    """Verify SpeechParam serialization with timbre_key (声音复刻)."""
     from app.services.tencent_digital_human_service import SpeechParam
 
     param = SpeechParam(speed=1.2, timbre_key="voice_001", volume=5)
@@ -143,6 +159,28 @@ def test_speech_param_to_dict():
     assert d["Speed"] == 1.2
     assert d["TimbreKey"] == "voice_001"
     assert d["Volume"] == 5
+
+
+def test_speech_param_with_pitch():
+    """Verify SpeechParam includes pitch when non-zero."""
+    from app.services.tencent_digital_human_service import SpeechParam
+
+    param = SpeechParam(speed=1.0, pitch=2.5)
+    d = param.to_dict()
+
+    assert d["Pitch"] == 2.5
+    assert "TimbreKey" not in d  # None timbre_key should be omitted
+
+
+def test_speech_param_default_no_pitch():
+    """Verify SpeechParam omits pitch when 0."""
+    from app.services.tencent_digital_human_service import SpeechParam
+
+    param = SpeechParam()
+    d = param.to_dict()
+
+    assert "Pitch" not in d
+    assert "TimbreKey" not in d
 
 
 # ──────────────────────────────────────────────
@@ -301,15 +339,95 @@ def test_create_liveroom_request_validation():
 
 
 def test_takeover_request_validation():
-    """Verify takeover request schema."""
+    """Verify takeover request schema (liveroom_id is in URL path, not body)."""
     from app.schemas.digital_human_schema import TakeoverRequest
 
     req = TakeoverRequest(
-        liveroom_id="room_123",
         content="Flash sale!",
     )
-    assert req.liveroom_id == "room_123"
     assert req.content == "Flash sale!"
+    assert req.event_type == "product_highlight"
+
+
+def test_speech_param_schema_with_cloned_voice():
+    """Verify SpeechParamSchema supports voice cloning (声音复刻) parameters."""
+    from app.schemas.digital_human_schema import SpeechParamSchema
+
+    param = SpeechParamSchema(
+        speed=1.0,
+        timbre_key="cloned_voice_12345",
+        volume=0,
+        pitch=1.5,
+    )
+    assert param.timbre_key == "cloned_voice_12345"
+    assert param.pitch == 1.5
+
+
+# ──────────────────────────────────────────────
+# Test 9: List Liverooms Pagination (v5.x.x)
+# ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_liverooms_pagination():
+    """Verify list_liverooms uses PageIndex (v5.x.x) instead of PageNumber."""
+    from app.services.tencent_digital_human_service import TencentDigitalHumanService
+
+    service = TencentDigitalHumanService(
+        appkey="test", access_token="test", project_id="test"
+    )
+
+    with patch.object(service, '_post', new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = {"LiveRoomList": [], "TotalCount": 0}
+        await service.list_liverooms(page_size=10, page_index=2)
+
+        call_args = mock_post.call_args
+        payload = call_args[0][1]
+        assert payload["PageSize"] == 10
+        assert payload["PageIndex"] == 2
+        assert "PageNumber" not in payload  # v5.x.x uses PageIndex, not PageNumber
+
+
+@pytest.mark.asyncio
+async def test_list_liverooms_validation():
+    """Verify list_liverooms validates PageSize and PageIndex."""
+    from app.services.tencent_digital_human_service import TencentDigitalHumanService
+
+    service = TencentDigitalHumanService(
+        appkey="test", access_token="test", project_id="test"
+    )
+
+    with pytest.raises(ValueError, match="PageSize"):
+        await service.list_liverooms(page_size=0)
+
+    with pytest.raises(ValueError, match="PageSize"):
+        await service.list_liverooms(page_size=1001)
+
+    with pytest.raises(ValueError, match="PageIndex"):
+        await service.list_liverooms(page_index=0)
+
+
+# ──────────────────────────────────────────────
+# Test 10: Health Check
+# ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_health_check_success():
+    """Verify health check returns ok on success."""
+    from app.services.tencent_digital_human_service import TencentDigitalHumanService
+
+    service = TencentDigitalHumanService(
+        appkey="test_appkey", access_token="test_token", project_id="test"
+    )
+
+    with patch.object(service, 'list_liverooms', new_callable=AsyncMock) as mock_list:
+        mock_list.return_value = {"LiveRoomList": [], "TotalCount": 0}
+        result = await service.health_check()
+
+        assert result["status"] == "ok"
+        assert result["appkey"] == "test_app..."
+        assert result["total_rooms"] == 0
 
 
 if __name__ == "__main__":

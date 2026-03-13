@@ -22,8 +22,13 @@ class VideoLayerSchema(BaseModel):
 
 class SpeechParamSchema(BaseModel):
     speed: float = Field(1.0, ge=0.5, le=2.0, description="Speech speed (0.5-2.0)")
-    timbre_key: Optional[str] = Field(None, description="Voice timbre key")
+    timbre_key: Optional[str] = Field(
+        None,
+        description="Voice timbre key. For custom cloned voice (声音复刻), "
+        "use the voice ID from Tencent IVH voice cloning service."
+    )
     volume: int = Field(0, ge=-10, le=10, description="Volume adjustment (-10 to 10)")
+    pitch: float = Field(0.0, ge=-12.0, le=12.0, description="Pitch adjustment in semitones (-12 to 12)")
 
 
 class AnchorParamSchema(BaseModel):
@@ -101,7 +106,6 @@ class ListLiveroomsResponse(BaseModel):
 
 class TakeoverRequest(BaseModel):
     """Request to send real-time interjection to a livestream."""
-    liveroom_id: str
     content: Optional[str] = Field(
         None,
         max_length=500,
