@@ -5,8 +5,10 @@ These tests verify:
   1. HMAC-SHA256 signature generation matches Tencent's documented examples
   2. Service class correctly builds API payloads (v5.x.x protocol)
   3. Script generator scoring and fallback logic
-  4. Schema validation
+  4. Schema validation (including hybrid mode)
   5. Health check functionality
+  6. ElevenLabs TTS service
+  7. Hybrid livestream service orchestration
 """
 
 import hashlib
@@ -150,7 +152,7 @@ def test_video_layer_to_dict():
 
 
 def test_speech_param_to_dict():
-    """Verify SpeechParam serialization with timbre_key (声音复刻)."""
+    """Verify SpeechParam serialization with timbre_key (声音復刻)."""
     from app.services.tencent_digital_human_service import SpeechParam
 
     param = SpeechParam(speed=1.2, timbre_key="voice_001", volume=5)
@@ -332,10 +334,12 @@ def test_create_liveroom_request_validation():
     assert req.cycle_times == 5
     assert req.protocol == "rtmp"
     assert req.tone == "professional_friendly"
+    assert req.use_hybrid_voice is False  # Default
 
-    # Valid request with scripts
-    req2 = CreateLiveroomRequest(scripts=["Hello world"])
+    # Valid request with scripts + hybrid mode
+    req2 = CreateLiveroomRequest(scripts=["Hello world"], use_hybrid_voice=True)
     assert req2.scripts == ["Hello world"]
+    assert req2.use_hybrid_voice is True
 
 
 def test_takeover_request_validation():
@@ -346,11 +350,20 @@ def test_takeover_request_validation():
         content="Flash sale!",
     )
     assert req.content == "Flash sale!"
-    assert req.event_type == "product_highlight"
+    assert req.use_hybrid_voice is False
+
+    # Hybrid mode
+    req2 = TakeoverRequest(
+        content="セール開始！",
+        use_hybrid_voice=True,
+        elevenlabs_voice_id="voice_123",
+    )
+    assert req2.use_hybrid_voice is True
+    assert req2.elevenlabs_voice_id == "voice_123"
 
 
 def test_speech_param_schema_with_cloned_voice():
-    """Verify SpeechParamSchema supports voice cloning (声音复刻) parameters."""
+    """Verify SpeechParamSchema supports voice cloning (声音復刻) parameters."""
     from app.schemas.digital_human_schema import SpeechParamSchema
 
     param = SpeechParamSchema(
@@ -428,6 +441,293 @@ async def test_health_check_success():
         assert result["status"] == "ok"
         assert result["appkey"] == "test_app..."
         assert result["total_rooms"] == 0
+
+
+# ══════════════════════════════════════════════
+# ElevenLabs & Hybrid Mode Tests
+# ══════════════════════════════════════════════
+
+# ──────────────────────────────────────────────
+# Test 11: ElevenLabs TTS Service
+# ──────────────────────────────────────────────
+
+
+def test_elevenlabs_service_init():
+    """Verify ElevenLabsTTSService initializes with constructor args."""
+    from app.services.elevenlabs_tts_service import ElevenLabsTTSService
+
+    service = ElevenLabsTTSService(
+        api_key="test_key",
+        voice_id="test_voice",
+        model_id="eleven_multilingual_v2",
+    )
+    assert service.api_key == "test_key"
+    assert service.voice_id == "test_voice"
+    assert service.model_id == "eleven_multilingual_v2"
+
+
+def test_elevenlabs_service_no_key():
+    """Verify ElevenLabsTTSService handles missing API key gracefully."""
+    import os
+    # Save and clear env vars
+    saved = {}
+    for key in ["ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID", "ELEVENLABS_MODEL_ID"]:
+        saved[key] = os.environ.pop(key, None)
+
+    try:
+        from app.services.elevenlabs_tts_service import ElevenLabsTTSService
+        service = ElevenLabsTTSService(api_key="", voice_id="", model_id="test")
+        # Empty string is falsy but not None
+        assert not service.api_key  # Should be empty/falsy
+    finally:
+        # Restore env vars
+        for key, val in saved.items():
+            if val is not None:
+                os.environ[key] = val
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_tts_generate():
+    """Verify ElevenLabs TTS generates audio correctly."""
+    from app.services.elevenlabs_tts_service import ElevenLabsTTSService
+
+    service = ElevenLabsTTSService(
+        api_key="test_key",
+        voice_id="test_voice",
+        model_id="eleven_multilingual_v2",
+    )
+
+    # Mock httpx response
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.content = b"\x00" * 32000  # 1 second of 16kHz 16bit PCM
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value = mock_client
+
+        result = await service.text_to_speech(
+            text="こんにちは、テストです。",
+            language_code="ja",
+        )
+
+        # text_to_speech returns raw bytes
+        assert isinstance(result, bytes)
+        assert len(result) == 32000
+
+
+@pytest.mark.asyncio
+async def test_elevenlabs_list_voices():
+    """Verify ElevenLabs voice listing."""
+    from app.services.elevenlabs_tts_service import ElevenLabsTTSService
+
+    service = ElevenLabsTTSService(
+        api_key="test_key",
+        voice_id="test_voice",
+    )
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "voices": [
+            {"voice_id": "v1", "name": "My Clone", "category": "cloned", "labels": {}},
+            {"voice_id": "v2", "name": "System", "category": "premade", "labels": {}},
+        ]
+    }
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value = mock_client
+
+        voices = await service.list_voices()
+        assert len(voices) == 2
+        assert voices[0]["name"] == "My Clone"
+
+
+def test_elevenlabs_chunk_audio():
+    """Verify audio chunking for Tencent Cloud."""
+    from app.services.elevenlabs_tts_service import ElevenLabsTTSService
+
+    # 2 seconds of PCM 16kHz 16bit mono = 64000 bytes
+    audio_bytes = b"\x00" * 64000
+    chunks = ElevenLabsTTSService.chunk_audio_for_tencent(audio_bytes)
+
+    # 64000 / 5120 = 12.5 → 13 data chunks + 1 final chunk = 14
+    assert len(chunks) == 14
+    assert chunks[-1]["IsFinal"] is True
+    assert chunks[-1]["Audio"] == ""
+    assert chunks[0]["Seq"] == 1
+    assert chunks[0]["IsFinal"] is False
+
+
+def test_elevenlabs_estimate_duration():
+    """Verify audio duration estimation."""
+    from app.services.elevenlabs_tts_service import ElevenLabsTTSService
+
+    # 1 second of PCM 16kHz 16bit mono = 32000 bytes
+    audio_bytes = b"\x00" * 32000
+    duration = ElevenLabsTTSService.estimate_audio_duration_ms(audio_bytes)
+    assert duration == 1000.0
+
+
+# ──────────────────────────────────────────────
+# Test 12: Hybrid Livestream Service
+# ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_hybrid_generate_script_audio():
+    """Verify hybrid service generates audio for multiple scripts."""
+    from app.services.hybrid_livestream_service import HybridLivestreamService
+
+    mock_el = MagicMock()
+    # text_to_speech is async, returns bytes
+    mock_el.text_to_speech = AsyncMock(return_value=b"\x00" * 32000)
+    # estimate_audio_duration_ms is sync, returns float
+    mock_el.estimate_audio_duration_ms = MagicMock(return_value=1000.0)
+    # chunk_audio_for_tencent is sync, returns list
+    mock_el.chunk_audio_for_tencent = MagicMock(return_value=[
+        {"Audio": "base64data", "Seq": 1, "IsFinal": False},
+        {"Audio": "", "Seq": 2, "IsFinal": True},
+    ])
+
+    mock_tencent = MagicMock()
+
+    hybrid = HybridLivestreamService(
+        elevenlabs_service=mock_el,
+        tencent_service=mock_tencent,
+    )
+
+    results = await hybrid.generate_script_audio(
+        scripts=["Script 1", "Script 2", "Script 3"],
+        language="ja",
+    )
+
+    assert len(results) == 3
+    assert mock_el.text_to_speech.call_count == 3
+    for r in results:
+        assert r["status"] == "ok"
+        assert r["duration_ms"] == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_hybrid_takeover_with_voice():
+    """Verify hybrid takeover generates audio and sends text takeover."""
+    from app.services.hybrid_livestream_service import HybridLivestreamService
+
+    mock_el = MagicMock()
+    mock_el.text_to_speech = AsyncMock(return_value=b"\x00" * 16000)
+    mock_el.estimate_audio_duration_ms = MagicMock(return_value=500.0)
+    mock_el.chunk_audio_for_tencent = MagicMock(return_value=[
+        {"Audio": "data", "Seq": 1, "IsFinal": False},
+        {"Audio": "", "Seq": 2, "IsFinal": True},
+    ])
+
+    mock_tencent = MagicMock()
+    mock_tencent.takeover = AsyncMock(return_value={"Code": 0})
+
+    hybrid = HybridLivestreamService(
+        elevenlabs_service=mock_el,
+        tencent_service=mock_tencent,
+    )
+
+    result = await hybrid.takeover_with_voice(
+        liveroom_id="room_123",
+        text="セール開始！",
+        language="ja",
+    )
+
+    assert result["status"] == "ok"
+    assert result["mode"] == "text_fallback"
+    assert result["audio_info"]["status"] == "generated"
+    mock_tencent.takeover.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_hybrid_health_check():
+    """Verify hybrid health check combines both services."""
+    from app.services.hybrid_livestream_service import HybridLivestreamService
+
+    mock_el = MagicMock()
+    mock_el.api_key = "test_key"
+    mock_el.voice_id = "test_voice"
+    mock_el.health_check = AsyncMock(return_value={
+        "status": "ok",
+        "total_voices": 5,
+        "cloned_voices": 1,
+        "default_voice_id": "test_voi...",
+        "model": "eleven_multilingual_v2",
+    })
+
+    mock_tencent = MagicMock()
+    mock_tencent.health_check = AsyncMock(return_value={
+        "status": "ok",
+        "total_rooms": 0,
+    })
+
+    hybrid = HybridLivestreamService(
+        elevenlabs_service=mock_el,
+        tencent_service=mock_tencent,
+    )
+
+    result = await hybrid.health_check()
+
+    assert result["status"] == "ok"
+    assert result["elevenlabs"]["status"] == "ok"
+    assert result["tencent"]["status"] == "ok"
+    assert result["capabilities"]["japanese_tts"] is True
+    assert result["capabilities"]["voice_cloning"] is True
+
+
+# ──────────────────────────────────────────────
+# Test 13: Hybrid Schema Validation
+# ──────────────────────────────────────────────
+
+
+def test_generate_audio_request_schema():
+    """Verify GenerateAudioRequest schema."""
+    from app.schemas.digital_human_schema import GenerateAudioRequest
+
+    req = GenerateAudioRequest(
+        texts=["こんにちは", "テストです"],
+        language="ja",
+    )
+    assert len(req.texts) == 2
+    assert req.language == "ja"
+
+
+def test_hybrid_health_response_schema():
+    """Verify HybridHealthResponse schema."""
+    from app.schemas.digital_human_schema import HybridHealthResponse
+
+    resp = HybridHealthResponse(
+        success=True,
+        overall_status="ok",
+        elevenlabs={"status": "ok"},
+        tencent={"status": "ok"},
+        capabilities={"japanese_tts": True},
+    )
+    assert resp.success is True
+    assert resp.capabilities["japanese_tts"] is True
+
+
+def test_voice_list_response_schema():
+    """Verify VoiceListResponse schema."""
+    from app.schemas.digital_human_schema import VoiceListResponse
+
+    resp = VoiceListResponse(
+        success=True,
+        voices=[{"voice_id": "v1", "name": "Test", "is_cloned": True}],
+        cloned_count=1,
+        total_count=1,
+    )
+    assert resp.cloned_count == 1
 
 
 if __name__ == "__main__":

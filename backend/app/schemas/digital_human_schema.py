@@ -1,5 +1,9 @@
 """
 Pydantic schemas for the Tencent Digital Human (數智人) Livestream API endpoints.
+
+Includes schemas for:
+  - Tencent Cloud IVH direct API (text-driven)
+  - Hybrid mode: ElevenLabs voice cloning + Tencent Cloud (audio-driven)
 """
 
 from __future__ import annotations
@@ -9,7 +13,7 @@ from pydantic import BaseModel, Field
 
 
 # ──────────────────────────────────────────────
-# Request Schemas
+# Common Schemas
 # ──────────────────────────────────────────────
 
 class VideoLayerSchema(BaseModel):
@@ -36,6 +40,10 @@ class AnchorParamSchema(BaseModel):
     vertical_position: float = Field(0.0, description="Vertical position offset")
     scale: float = Field(1.0, ge=0.1, le=3.0, description="Scale factor")
 
+
+# ──────────────────────────────────────────────
+# Liveroom Request/Response Schemas
+# ──────────────────────────────────────────────
 
 class CreateLiveroomRequest(BaseModel):
     """Request to create a new digital human livestream room."""
@@ -68,6 +76,17 @@ class CreateLiveroomRequest(BaseModel):
         description="Script tone: professional_friendly / energetic / calm"
     )
     language: str = Field("ja", description="Script language: ja / zh / en")
+    # Hybrid mode options
+    use_hybrid_voice: bool = Field(
+        False,
+        description="If true, use ElevenLabs voice cloning for TTS "
+        "(supports Japanese). Pre-generates audio for each script."
+    )
+    elevenlabs_voice_id: Optional[str] = Field(
+        None,
+        description="Override ElevenLabs voice ID for hybrid mode. "
+        "If not set, uses the default configured voice."
+    )
 
 
 class CreateLiveroomResponse(BaseModel):
@@ -80,6 +99,12 @@ class CreateLiveroomResponse(BaseModel):
     play_url: Optional[str] = None
     script_preview: Optional[str] = Field(
         None, description="First 500 chars of the generated script"
+    )
+    mode: Optional[str] = Field(
+        None, description="Operation mode: text_only / hybrid"
+    )
+    audio_results: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Pre-generated audio info (hybrid mode only)"
     )
     error: Optional[str] = None
 
@@ -123,11 +148,23 @@ class TakeoverRequest(BaseModel):
         description="Event type: product_highlight / engagement_spike / flash_sale / viewer_question"
     )
     language: str = Field("ja", description="Language for auto-generated script")
+    # Hybrid mode options
+    use_hybrid_voice: bool = Field(
+        False,
+        description="If true, also generate audio with ElevenLabs cloned voice"
+    )
+    elevenlabs_voice_id: Optional[str] = Field(
+        None, description="Override ElevenLabs voice ID"
+    )
 
 
 class TakeoverResponse(BaseModel):
     success: bool
     content_sent: Optional[str] = None
+    mode: Optional[str] = Field(None, description="text_only / hybrid")
+    audio_info: Optional[Dict[str, Any]] = Field(
+        None, description="Audio generation info (hybrid mode)"
+    )
     error: Optional[str] = None
 
 
@@ -161,4 +198,49 @@ class GenerateScriptResponse(BaseModel):
     phases_used: Optional[int] = Field(
         None, description="Number of analysis phases used to generate the script"
     )
+    error: Optional[str] = None
+
+
+# ──────────────────────────────────────────────
+# Hybrid / ElevenLabs Schemas
+# ──────────────────────────────────────────────
+
+class HybridHealthResponse(BaseModel):
+    """Health check response for the hybrid architecture."""
+    success: bool
+    overall_status: Optional[str] = None
+    elevenlabs: Optional[Dict[str, Any]] = None
+    tencent: Optional[Dict[str, Any]] = None
+    capabilities: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class GenerateAudioRequest(BaseModel):
+    """Request to pre-generate audio from text using ElevenLabs voice cloning."""
+    texts: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description="List of texts to convert to speech (max 50)"
+    )
+    language: str = Field("ja", description="Language code (ja/zh/en/ko etc.)")
+    voice_id: Optional[str] = Field(
+        None, description="Override ElevenLabs voice ID"
+    )
+
+
+class GenerateAudioResponse(BaseModel):
+    """Response with audio generation results."""
+    success: bool
+    results: Optional[List[Dict[str, Any]]] = None
+    total_duration_ms: Optional[float] = None
+    error: Optional[str] = None
+
+
+class VoiceListResponse(BaseModel):
+    """Response listing available ElevenLabs voices."""
+    success: bool
+    voices: Optional[List[Dict[str, Any]]] = None
+    cloned_count: Optional[int] = None
+    total_count: Optional[int] = None
     error: Optional[str] = None

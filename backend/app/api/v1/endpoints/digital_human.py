@@ -1,19 +1,33 @@
 """
 Digital Human (數智人) Livestream API Endpoints
 
-These endpoints provide the AitherHub ↔ Tencent Cloud IVH integration:
+These endpoints provide the AitherHub ↔ Tencent Cloud IVH + ElevenLabs integration:
 
-  POST /api/v1/digital-human/liveroom/create     – Create livestream room (auto-generate scripts from analysis)
+  === Liveroom Management ===
+  POST /api/v1/digital-human/liveroom/create     – Create livestream room (supports hybrid voice mode)
   GET  /api/v1/digital-human/liveroom/{id}        – Query livestream room status
   GET  /api/v1/digital-human/liverooms            – List all active livestream rooms
-  POST /api/v1/digital-human/liveroom/{id}/takeover – Send real-time interjection
+  POST /api/v1/digital-human/liveroom/{id}/takeover – Send real-time interjection (supports hybrid voice)
   POST /api/v1/digital-human/liveroom/{id}/close  – Close livestream room
-  POST /api/v1/digital-human/script/generate      – Generate script from analysis (preview, no liveroom)
+
+  === Script & Audio Generation ===
+  POST /api/v1/digital-human/script/generate      – Generate script from analysis (preview)
+  POST /api/v1/digital-human/audio/generate       – Pre-generate audio with cloned voice
+
+  === Voice & Health ===
+  GET  /api/v1/digital-human/voices               – List available ElevenLabs voices
+  GET  /api/v1/digital-human/health               – Health check (both services)
 
 Architecture:
-  This is a PoC module. Authentication uses the existing AitherHub admin key
-  (X-Admin-Key header) for simplicity. In production, this should be integrated
-  with the full user auth system.
+  Hybrid mode combines ElevenLabs TTS (voice cloning, supports Japanese)
+  with Tencent Cloud Digital Human (lip-sync, visual rendering).
+
+  ┌─────────────┐     ┌──────────────┐     ┌──────────────────┐
+  │  Text Input  │────▶│ ElevenLabs   │────▶│ Tencent Cloud    │
+  │  (台本/評論) │     │ TTS API      │     │ Digital Human    │
+  │              │     │ (声音克隆)    │     │ (口型同步+直播)   │
+  └─────────────┘     │ PCM 16kHz    │     │ Audio Driver     │
+                      └──────────────┘     └──────────────────┘
 """
 
 from __future__ import annotations
@@ -21,7 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
@@ -32,10 +46,13 @@ from app.schemas.digital_human_schema import (
     ListLiveroomsResponse,
     TakeoverRequest,
     TakeoverResponse,
-    CloseLiveroomRequest,
     CloseLiveroomResponse,
     GenerateScriptRequest,
     GenerateScriptResponse,
+    HybridHealthResponse,
+    GenerateAudioRequest,
+    GenerateAudioResponse,
+    VoiceListResponse,
 )
 from app.services.tencent_digital_human_service import (
     TencentDigitalHumanService,
@@ -46,6 +63,11 @@ from app.services.tencent_digital_human_service import (
     AnchorParam,
     LIVEROOM_STATUS,
 )
+from app.services.elevenlabs_tts_service import (
+    ElevenLabsTTSService,
+    ElevenLabsError,
+)
+from app.services.hybrid_livestream_service import HybridLivestreamService
 from app.services.script_generator_service import (
     generate_liveroom_scripts,
     generate_takeover_script,
@@ -73,10 +95,12 @@ async def verify_admin_key(x_admin_key: str = Header(...)):
 
 
 # ──────────────────────────────────────────────
-# Service singleton
+# Service singletons
 # ──────────────────────────────────────────────
 
 _tencent_service: Optional[TencentDigitalHumanService] = None
+_elevenlabs_service: Optional[ElevenLabsTTSService] = None
+_hybrid_service: Optional[HybridLivestreamService] = None
 
 
 def get_tencent_service() -> TencentDigitalHumanService:
@@ -85,6 +109,27 @@ def get_tencent_service() -> TencentDigitalHumanService:
         _tencent_service = TencentDigitalHumanService()
     return _tencent_service
 
+
+def get_elevenlabs_service() -> ElevenLabsTTSService:
+    global _elevenlabs_service
+    if _elevenlabs_service is None:
+        _elevenlabs_service = ElevenLabsTTSService()
+    return _elevenlabs_service
+
+
+def get_hybrid_service() -> HybridLivestreamService:
+    global _hybrid_service
+    if _hybrid_service is None:
+        _hybrid_service = HybridLivestreamService(
+            elevenlabs_service=get_elevenlabs_service(),
+            tencent_service=get_tencent_service(),
+        )
+    return _hybrid_service
+
+
+# ══════════════════════════════════════════════
+# LIVEROOM MANAGEMENT
+# ══════════════════════════════════════════════
 
 # ──────────────────────────────────────────────
 # 1. Create Liveroom
@@ -97,7 +142,7 @@ def get_tencent_service() -> TencentDigitalHumanService:
     description=(
         "Create a new Tencent Cloud IVH livestream room. "
         "If video_id is provided, scripts are auto-generated from AitherHub analysis results. "
-        "Otherwise, provide scripts manually."
+        "Set use_hybrid_voice=true to pre-generate audio with ElevenLabs voice cloning."
     ),
 )
 async def create_liveroom(
@@ -118,33 +163,44 @@ async def create_liveroom(
                 tone=req.tone,
                 language=req.language,
             )
-            scripts = []
-            for sd in script_dicts:
-                bgs = []
-                if req.backgrounds:
-                    bgs = [
-                        VideoLayer(url=bg.url, x=bg.x, y=bg.y, width=bg.width, height=bg.height)
-                        for bg in req.backgrounds
-                    ]
-                scripts.append(ScriptReq(
-                    content=sd["Content"],
-                    backgrounds=bgs,
-                ))
+            scripts_text = [sd["Content"] for sd in script_dicts]
         elif req.scripts:
-            scripts = []
-            for text in req.scripts:
-                bgs = []
-                if req.backgrounds:
-                    bgs = [
-                        VideoLayer(url=bg.url, x=bg.x, y=bg.y, width=bg.width, height=bg.height)
-                        for bg in req.backgrounds
-                    ]
-                scripts.append(ScriptReq(content=text, backgrounds=bgs))
+            scripts_text = req.scripts
         else:
             raise HTTPException(
                 status_code=400,
                 detail="Either video_id or scripts must be provided",
             )
+
+        # Hybrid mode: pre-generate audio with ElevenLabs
+        audio_results = None
+        mode = "text_only"
+        if req.use_hybrid_voice:
+            mode = "hybrid"
+            hybrid = get_hybrid_service()
+            try:
+                audio_results = await hybrid.generate_script_audio(
+                    scripts=scripts_text,
+                    language=req.language,
+                    voice_id=req.elevenlabs_voice_id,
+                )
+                logger.info(
+                    f"Hybrid audio generated: {len(audio_results)} scripts"
+                )
+            except ElevenLabsError as e:
+                logger.warning(f"ElevenLabs audio generation failed, continuing with text: {e}")
+                audio_results = [{"status": "error", "error": str(e)}]
+
+        # Build script objects for Tencent API
+        scripts = []
+        for text in scripts_text:
+            bgs = []
+            if req.backgrounds:
+                bgs = [
+                    VideoLayer(url=bg.url, x=bg.x, y=bg.y, width=bg.width, height=bg.height)
+                    for bg in req.backgrounds
+                ]
+            scripts.append(ScriptReq(content=text, backgrounds=bgs))
 
         # Build optional params
         speech_param = None
@@ -184,6 +240,8 @@ async def create_liveroom(
             req_id=result.get("ReqId"),
             play_url=result.get("VideoStreamPlayUrl"),
             script_preview=scripts[0].content[:500] if scripts else None,
+            mode=mode,
+            audio_results=audio_results,
         )
 
     except TencentAPIError as e:
@@ -270,7 +328,8 @@ async def list_liverooms(
     summary="Send real-time interjection to livestream",
     description=(
         "Interrupt the current script and have the digital human speak the given text immediately. "
-        "If content is not provided, it will be auto-generated from event_context."
+        "If content is not provided, it will be auto-generated from event_context. "
+        "Set use_hybrid_voice=true to also generate audio with cloned voice."
     ),
 )
 async def takeover_liveroom(
@@ -296,8 +355,38 @@ async def takeover_liveroom(
                 detail="Either content or event_context must be provided",
             )
 
+        # Hybrid mode: generate audio with ElevenLabs
+        audio_info = None
+        mode = "text_only"
+        if req.use_hybrid_voice:
+            mode = "hybrid"
+            hybrid = get_hybrid_service()
+            try:
+                result = await hybrid.takeover_with_voice(
+                    liveroom_id=liveroom_id,
+                    text=content,
+                    language=req.language,
+                    voice_id=req.elevenlabs_voice_id,
+                )
+                audio_info = result.get("audio_info")
+                return TakeoverResponse(
+                    success=True,
+                    content_sent=content,
+                    mode=mode,
+                    audio_info=audio_info,
+                )
+            except Exception as e:
+                logger.warning(f"Hybrid takeover failed, falling back to text: {e}")
+                audio_info = {"status": "failed", "error": str(e)}
+
+        # Standard text-based takeover
         result = await service.takeover(liveroom_id, content)
-        return TakeoverResponse(success=True, content_sent=content)
+        return TakeoverResponse(
+            success=True,
+            content_sent=content,
+            mode=mode,
+            audio_info=audio_info,
+        )
 
     except TencentAPIError as e:
         return TakeoverResponse(success=False, error=str(e))
@@ -330,6 +419,10 @@ async def close_liveroom(
         logger.exception(f"Error closing liveroom: {e}")
         return CloseLiveroomResponse(success=False, error=f"Internal error: {str(e)}")
 
+
+# ══════════════════════════════════════════════
+# SCRIPT & AUDIO GENERATION
+# ══════════════════════════════════════════════
 
 # ──────────────────────────────────────────────
 # 6. Generate Script (Preview, no liveroom)
@@ -378,3 +471,129 @@ async def generate_script(
     except Exception as e:
         logger.exception(f"Error generating script: {e}")
         return GenerateScriptResponse(success=False, error=f"Internal error: {str(e)}")
+
+
+# ──────────────────────────────────────────────
+# 7. Generate Audio (ElevenLabs voice cloning)
+# ──────────────────────────────────────────────
+
+@router.post(
+    "/audio/generate",
+    response_model=GenerateAudioResponse,
+    summary="Pre-generate audio with cloned voice",
+    description=(
+        "Generate speech audio from text using ElevenLabs voice cloning. "
+        "Supports 32+ languages including Japanese. "
+        "Audio is generated in PCM 16kHz format compatible with Tencent Cloud audio driver."
+    ),
+)
+async def generate_audio(
+    req: GenerateAudioRequest,
+    _auth: bool = Depends(verify_admin_key),
+):
+    try:
+        hybrid = get_hybrid_service()
+        results = await hybrid.generate_script_audio(
+            scripts=req.texts,
+            language=req.language,
+            voice_id=req.voice_id,
+        )
+
+        total_duration = sum(
+            r.get("duration_ms", 0) for r in results if r.get("status") == "ok"
+        )
+
+        return GenerateAudioResponse(
+            success=True,
+            results=results,
+            total_duration_ms=round(total_duration, 1),
+        )
+
+    except ElevenLabsError as e:
+        return GenerateAudioResponse(success=False, error=str(e))
+    except Exception as e:
+        logger.exception(f"Error generating audio: {e}")
+        return GenerateAudioResponse(success=False, error=f"Internal error: {str(e)}")
+
+
+# ══════════════════════════════════════════════
+# VOICE & HEALTH
+# ══════════════════════════════════════════════
+
+# ──────────────────────────────────────────────
+# 8. List Voices
+# ──────────────────────────────────────────────
+
+@router.get(
+    "/voices",
+    response_model=VoiceListResponse,
+    summary="List available ElevenLabs voices",
+    description="List all voices including cloned voices available for TTS.",
+)
+async def list_voices(
+    _auth: bool = Depends(verify_admin_key),
+):
+    try:
+        el_service = get_elevenlabs_service()
+        voices = await el_service.list_voices()
+
+        # Simplify voice data for response
+        voice_list = []
+        cloned_count = 0
+        for v in voices:
+            is_cloned = v.get("category") == "cloned"
+            if is_cloned:
+                cloned_count += 1
+            voice_list.append({
+                "voice_id": v.get("voice_id"),
+                "name": v.get("name"),
+                "category": v.get("category"),
+                "labels": v.get("labels", {}),
+                "is_cloned": is_cloned,
+            })
+
+        return VoiceListResponse(
+            success=True,
+            voices=voice_list,
+            cloned_count=cloned_count,
+            total_count=len(voice_list),
+        )
+
+    except ElevenLabsError as e:
+        return VoiceListResponse(success=False, error=str(e))
+    except Exception as e:
+        logger.exception(f"Error listing voices: {e}")
+        return VoiceListResponse(success=False, error=f"Internal error: {str(e)}")
+
+
+# ──────────────────────────────────────────────
+# 9. Health Check
+# ──────────────────────────────────────────────
+
+@router.get(
+    "/health",
+    response_model=HybridHealthResponse,
+    summary="Health check for digital human services",
+    description="Check connectivity to both Tencent Cloud IVH and ElevenLabs APIs.",
+)
+async def health_check(
+    _auth: bool = Depends(verify_admin_key),
+):
+    try:
+        hybrid = get_hybrid_service()
+        result = await hybrid.health_check()
+
+        return HybridHealthResponse(
+            success=True,
+            overall_status=result.get("status"),
+            elevenlabs=result.get("elevenlabs"),
+            tencent=result.get("tencent"),
+            capabilities=result.get("capabilities"),
+        )
+
+    except Exception as e:
+        logger.exception(f"Health check error: {e}")
+        return HybridHealthResponse(
+            success=False,
+            error=f"Health check failed: {str(e)}",
+        )
