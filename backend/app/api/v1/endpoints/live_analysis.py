@@ -225,7 +225,7 @@ async def start_live_analysis(
         # This prevents creating jobs when iOS failed to upload chunks
         email = current_user.get("email", "")
         if payload.total_chunks and payload.total_chunks > 0 and email:
-            chunk_exists = await check_blob_exists(
+            chunk_exists = check_blob_exists(
                 email=email,
                 video_id=video_id,
                 filename="chunks/chunk_0000.mp4",

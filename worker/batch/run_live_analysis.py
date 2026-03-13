@@ -126,6 +126,11 @@ async def main():
             )
 
     except Exception as exc:
+        from app.services.live_analysis_pipeline import ChunkNotFoundError
+        if isinstance(exc, ChunkNotFoundError):
+            logger.error(f"[run_live_analysis] CHUNK_NOT_FOUND (non-retryable): job={args.job_id} error={exc}")
+            await engine.dispose()
+            sys.exit(2)  # exit 2 = skip, don't retry
         logger.error(f"[run_live_analysis] Failed: job={args.job_id} error={exc}")
         sys.exit(1)
     finally:

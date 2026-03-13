@@ -844,6 +844,27 @@ async def _retry_live_boost_admin(
         await db.commit()
         await db.refresh(job)
 
+        # Verify chunks exist in blob storage before enqueuing
+        from app.services.storage_service import check_blob_exists
+        chunk_exists = check_blob_exists(
+            email=user_email,
+            video_id=video_id,
+            filename="chunks/chunk_0000.mp4",
+        )
+        if not chunk_exists:
+            logger.warning(
+                f"[admin/retry-video/live_boost] No chunks in blob storage for "
+                f"video={video_id} email={user_email}"
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Cannot retry: no chunks found in blob storage. "
+                    f"Expected blob: {user_email}/{video_id}/chunks/chunk_0000.mp4. "
+                    f"iOS app may have failed to upload chunks."
+                ),
+            )
+
         # Enqueue live_analysis job
         enqueue_result = await enqueue_job({
             "job_type": "live_analysis",

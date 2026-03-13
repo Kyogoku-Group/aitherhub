@@ -37,6 +37,12 @@ from app.models.orm.live_analysis_job import LiveAnalysisJob
 logger = logging.getLogger(__name__)
 
 
+class ChunkNotFoundError(Exception):
+    """Raised when no chunks are found in blob storage.
+    This is a non-retryable error — the iOS app failed to upload chunks."""
+    pass
+
+
 # ──────────────────────────────────────────────
 # Pipeline Step Definitions
 # ──────────────────────────────────────────────
@@ -179,6 +185,37 @@ class LiveAnalysisPipeline:
 
             return results
 
+        except ChunkNotFoundError as exc:
+            # Non-retryable: chunks missing from blob storage
+            logger.error(f"[pipeline] CHUNK_NOT_FOUND job={job_id}: {exc}")
+            try:
+                await self.db.execute(
+                    update(LiveAnalysisJob)
+                    .where(LiveAnalysisJob.id == job_uuid)
+                    .values(
+                        status="failed",
+                        error_message=f"CHUNK_NOT_FOUND: {exc}"[:2000],
+                    )
+                )
+                try:
+                    await self.db.execute(
+                        text("""
+                            UPDATE videos
+                            SET status = 'ERROR',
+                                error_message = :err,
+                                updated_at = now()
+                            WHERE id = :video_id
+                        """),
+                        {"video_id": video_id, "err": f"CHUNK_NOT_FOUND: {exc}"[:500]},
+                    )
+                except Exception:
+                    pass
+                await self.db.commit()
+            except Exception as _e:
+                logger.debug(f"Suppressed: {_e}")
+            # Re-raise as ChunkNotFoundError so caller can exit(2)
+            raise
+
         except Exception as exc:
             logger.exception(f"[pipeline] Failed job={job_id}: {exc}")
             try:
@@ -315,10 +352,9 @@ class LiveAnalysisPipeline:
             total_chunks = await self._discover_chunk_count(email, video_id)
 
         if total_chunks == 0:
-            raise ValueError(
-                f"BUILD 33: No chunks found in blob storage for video_id={video_id} "
-                f"email={email}. This usually means the iOS app failed to upload "
-                f"chunks before calling /start. Check ChunkUploadService logs on device."
+            raise ChunkNotFoundError(
+                f"No chunks found in blob storage for video_id={video_id} "
+                f"email={email}. iOS app failed to upload chunks before calling /start."
             )
 
         # Download each chunk
@@ -352,8 +388,8 @@ class LiveAnalysisPipeline:
                     logger.warning(f"[assemble] Failed to download chunk {i}: {e}")
 
         if not chunk_paths:
-            raise ValueError(
-                f"BUILD 33: No chunks could be downloaded for video_id={video_id}. "
+            raise ChunkNotFoundError(
+                f"No chunks could be downloaded for video_id={video_id}. "
                 f"Expected {total_chunks} chunks but downloaded 0. "
                 f"Blob path: {email}/{video_id}/chunks/chunk_XXXX.mp4"
             )
