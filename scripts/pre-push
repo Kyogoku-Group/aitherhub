@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────
+# Layer 3: Pre-push hook — Overwrite Prevention
+# ─────────────────────────────────────────────────────────────────
+# This hook runs before every `git push` and performs two checks:
+#
+# 1. REBASE CHECK: Ensures local branch is up-to-date with remote.
+#    If remote has commits not in local, push is blocked with
+#    instructions to run `git pull --rebase`.
+#
+# 2. DIFF SIZE CHECK: Warns if a single file has too many deletions
+#    (potential overwrite). Threshold: 50 net deleted lines.
+#
+# Overhead: < 0.5 seconds (git fetch + diff)
+# ─────────────────────────────────────────────────────────────────
+
+set -e
+
+REMOTE="origin"
+BRANCH="master"
+DELETE_THRESHOLD=50
+
+# ── Color helpers ───────────────────────────────────────────────
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+echo -e "${GREEN}[pre-push]${NC} Running safety checks..."
+
+# ── 1. Rebase check ────────────────────────────────────────────
+echo -e "${GREEN}[pre-push]${NC} Checking for remote changes..."
+git fetch "$REMOTE" "$BRANCH" --quiet 2>/dev/null || true
+
+LOCAL_HEAD=$(git rev-parse HEAD)
+REMOTE_HEAD=$(git rev-parse "$REMOTE/$BRANCH" 2>/dev/null || echo "")
+
+if [ -n "$REMOTE_HEAD" ] && [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+    # Check if remote head is an ancestor of local head
+    if ! git merge-base --is-ancestor "$REMOTE_HEAD" HEAD 2>/dev/null; then
+        echo ""
+        echo -e "${RED}╔══════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${RED}║  PUSH BLOCKED: Remote has newer commits!                ║${NC}"
+        echo -e "${RED}║                                                         ║${NC}"
+        echo -e "${RED}║  Run: git pull --rebase origin master                   ║${NC}"
+        echo -e "${RED}║  Then: git push                                         ║${NC}"
+        echo -e "${RED}╚══════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        exit 1
+    fi
+fi
+
+# ── 2. Diff size check (warn on large deletions) ───────────────
+echo -e "${GREEN}[pre-push]${NC} Checking for suspicious deletions..."
+
+if [ -n "$REMOTE_HEAD" ]; then
+    DIFF_TARGET="$REMOTE_HEAD"
+else
+    DIFF_TARGET="HEAD~1"
+fi
+
+# Get per-file stats: additions and deletions
+SUSPICIOUS_FILES=""
+while IFS=$'\t' read -r added deleted filepath; do
+    # Skip binary files (shown as "-")
+    [ "$added" = "-" ] && continue
+    [ "$deleted" = "-" ] && continue
+    [ -z "$filepath" ] && continue
+
+    net_deleted=$((deleted - added))
+    if [ "$net_deleted" -gt "$DELETE_THRESHOLD" ]; then
+        SUSPICIOUS_FILES="${SUSPICIOUS_FILES}\n  ${filepath}: -${deleted}/+${added} (net -${net_deleted} lines)"
+    fi
+done < <(git diff --numstat "$DIFF_TARGET" HEAD 2>/dev/null || true)
+
+if [ -n "$SUSPICIOUS_FILES" ]; then
+    echo ""
+    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║  WARNING: Large deletions detected in these files:      ║${NC}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo -e "$SUSPICIOUS_FILES"
+    echo ""
+    echo -e "${YELLOW}If this is intentional, the push will proceed.${NC}"
+    echo -e "${YELLOW}If not, press Ctrl+C within 3 seconds to abort.${NC}"
+    echo ""
+    # In non-interactive mode (CI/Manus), sleep is skipped
+    if [ -t 0 ]; then
+        sleep 3
+    fi
+fi
+
+echo -e "${GREEN}[pre-push]${NC} All checks passed. Pushing..."
+exit 0
