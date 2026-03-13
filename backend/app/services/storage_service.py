@@ -166,7 +166,7 @@ def generate_read_sas_from_url(
         return None
 
 
-async def check_blob_exists(email: str, video_id: str, filename: str) -> bool:
+def check_blob_exists(email: str, video_id: str, filename: str) -> bool:
     """
     BUILD 33: Check if a specific blob exists in Azure Blob Storage.
     Used to verify chunks were actually uploaded before starting analysis.
