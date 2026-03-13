@@ -1790,9 +1790,20 @@ async def _retry_live_boost_analysis(
                 LiveAnalysisJob.video_id == video_id,
             ).order_by(LiveAnalysisJob.created_at.desc())
         )
-        existing_job = result.scalar_one_or_none()
+        existing_job = result.scalars().first()
 
         if existing_job:
+            # BUILD 36: Clean up duplicate jobs
+            try:
+                from sqlalchemy import delete as sa_delete
+                await db.execute(
+                    sa_delete(LiveAnalysisJob).where(
+                        LiveAnalysisJob.video_id == video_id,
+                        LiveAnalysisJob.id != existing_job.id,
+                    )
+                )
+            except Exception:
+                pass
             # Reset existing job for retry
             existing_job.status = "pending"
             existing_job.current_step = None

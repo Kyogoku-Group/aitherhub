@@ -11,6 +11,12 @@ BUILD 30: Self-healing status API
   - Eliminates "waiting forever" — if job is missing, create + enqueue it
   - Retry endpoint improved with total_chunks from video metadata
 
+BUILD 36: Idempotent /start + duplicate-safe queries
+  - /start is now fully idempotent — safe to call multiple times
+  - All queries use scalars().first() instead of scalar_one_or_none()
+    to handle duplicate rows gracefully (race condition from iOS double-call)
+  - Duplicate job cleanup: keeps latest, deletes older duplicates
+
 ╔══════════════════════════════════════════════════════════════════╗
 ║  Routes:                                                        ║
 ║    POST /api/v1/live-analysis/start                              ║
@@ -27,7 +33,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, text
+from sqlalchemy import select, update, delete, text
 from loguru import logger
 
 from app.core.db import get_db
@@ -76,6 +82,63 @@ async def migrate_tables():
 
 
 # ──────────────────────────────────────────────
+# Helper: Find the latest job for a video (duplicate-safe)
+# ──────────────────────────────────────────────
+async def _find_latest_job(
+    db: AsyncSession,
+    video_id: str,
+    user_id: int,
+) -> LiveAnalysisJob | None:
+    """
+    BUILD 36: Find the most recent LiveAnalysisJob for a video.
+    Uses scalars().first() instead of scalar_one_or_none() to handle
+    duplicate rows gracefully (caused by iOS double-calling /start).
+    Always returns the latest job (ORDER BY created_at DESC).
+    """
+    result = await db.execute(
+        select(LiveAnalysisJob).where(
+            LiveAnalysisJob.video_id == video_id,
+            LiveAnalysisJob.user_id == user_id,
+        ).order_by(LiveAnalysisJob.created_at.desc())
+    )
+    return result.scalars().first()
+
+
+# ──────────────────────────────────────────────
+# Helper: Clean up duplicate jobs (keep latest only)
+# ──────────────────────────────────────────────
+async def _cleanup_duplicate_jobs(
+    db: AsyncSession,
+    video_id: str,
+    user_id: int,
+    keep_job_id: uuid_module.UUID,
+) -> int:
+    """
+    BUILD 36: Delete duplicate LiveAnalysisJob rows for the same video,
+    keeping only the one with keep_job_id.
+    Returns the number of deleted rows.
+    """
+    try:
+        result = await db.execute(
+            delete(LiveAnalysisJob).where(
+                LiveAnalysisJob.video_id == video_id,
+                LiveAnalysisJob.user_id == user_id,
+                LiveAnalysisJob.id != keep_job_id,
+            )
+        )
+        deleted = result.rowcount
+        if deleted > 0:
+            logger.warning(
+                f"[live-analysis] BUILD 36: Cleaned up {deleted} duplicate job(s) "
+                f"for video={video_id} (kept job={keep_job_id})"
+            )
+        return deleted
+    except Exception as e:
+        logger.warning(f"[live-analysis] Failed to cleanup duplicates: {e}")
+        return 0
+
+
+# ──────────────────────────────────────────────
 # Helper: Ensure videos table record exists
 # ──────────────────────────────────────────────
 async def _ensure_video_record(
@@ -92,7 +155,7 @@ async def _ensure_video_record(
         result = await db.execute(
             select(Video).where(Video.id == uuid_module.UUID(video_id))
         )
-        existing = result.scalar_one_or_none()
+        existing = result.scalars().first()
 
         if existing:
             if existing.status in ("ERROR", "failed") and status_value in ("uploaded", "pending"):
@@ -136,9 +199,20 @@ async def _auto_create_and_enqueue_job(
     """
     BUILD 30: Self-healing — create a LiveAnalysisJob and enqueue it.
     Called when status API detects a video record exists but no job.
+
+    BUILD 36: Check for existing job first to prevent duplicates.
     Returns the created job, or None on failure.
     """
     try:
+        # BUILD 36: Check if a job already exists (race condition guard)
+        existing = await _find_latest_job(db, video_id, user_id)
+        if existing:
+            logger.info(
+                f"[live-analysis/auto-heal] Job already exists: {existing.id} "
+                f"status={existing.status} — skipping creation"
+            )
+            return existing
+
         job = LiveAnalysisJob(
             id=uuid_module.uuid4(),
             video_id=video_id,
@@ -201,7 +275,7 @@ async def _auto_create_and_enqueue_job(
 
 
 # ──────────────────────────────────────────────
-# 1. Start Analysis
+# 1. Start Analysis (IDEMPOTENT — BUILD 36)
 # ──────────────────────────────────────────────
 @router.post("/start", response_model=LiveAnalysisStartResponse)
 async def start_live_analysis(
@@ -211,6 +285,11 @@ async def start_live_analysis(
 ):
     """
     Trigger the analysis pipeline after all chunks have been uploaded.
+
+    BUILD 36: This endpoint is fully IDEMPOTENT — safe to call multiple times.
+    If a job already exists for this video (any status except 'failed'),
+    it returns the existing job without creating a duplicate.
+    iOS app may call this twice due to state machine race conditions.
     """
     try:
         user_id = current_user["id"]
@@ -243,21 +322,20 @@ async def start_live_analysis(
                 )
             logger.info(f"[live-analysis/start] BUILD 33: chunk_0000.mp4 verified in blob storage")
 
-        # Check for duplicate
-        existing = await db.execute(
-            select(LiveAnalysisJob).where(
-                LiveAnalysisJob.video_id == video_id,
-                LiveAnalysisJob.user_id == user_id,
-            )
-        )
-        existing_job = existing.scalar_one_or_none()
+        # BUILD 36: Use duplicate-safe query (scalars().first())
+        existing_job = await _find_latest_job(db, video_id, user_id)
 
         if existing_job:
             if existing_job.status not in ("failed",):
+                # Job already exists and is not failed — return it (idempotent)
                 logger.info(
                     f"[live-analysis/start] Job already exists: {existing_job.id} "
-                    f"status={existing_job.status}"
+                    f"status={existing_job.status} — returning existing (idempotent)"
                 )
+                # BUILD 36: Clean up any duplicate jobs
+                await _cleanup_duplicate_jobs(db, video_id, user_id, existing_job.id)
+                await db.commit()
+
                 return LiveAnalysisStartResponse(
                     job_id=str(existing_job.id),
                     video_id=video_id,
@@ -277,6 +355,9 @@ async def start_live_analysis(
                 if payload.total_chunks:
                     existing_job.total_chunks = payload.total_chunks
                 job = existing_job
+
+                # BUILD 36: Clean up any duplicate jobs
+                await _cleanup_duplicate_jobs(db, video_id, user_id, job.id)
 
                 await _ensure_video_record(db, video_id, user_id, "uploaded")
                 await db.commit()
@@ -383,7 +464,7 @@ async def start_live_analysis(
 
 
 # ──────────────────────────────────────────────
-# 2. Get Analysis Status (SELF-HEALING)
+# 2. Get Analysis Status (SELF-HEALING + DUPLICATE-SAFE)
 # ──────────────────────────────────────────────
 @router.get("/status/{video_id}", response_model=LiveAnalysisStatusResponse)
 async def get_analysis_status(
@@ -397,18 +478,25 @@ async def get_analysis_status(
     BUILD 30: SELF-HEALING — if no job exists but a video record does,
     automatically create the job and enqueue it. This eliminates the
     "waiting forever" state that occurs when /start fails during deploy.
+
+    BUILD 36: DUPLICATE-SAFE — uses scalars().first() instead of
+    scalar_one_or_none() to handle duplicate rows gracefully.
+    Also cleans up duplicate jobs when found.
     """
     try:
         user_id = current_user["id"]
         email = current_user.get("email", "")
 
-        result = await db.execute(
-            select(LiveAnalysisJob).where(
-                LiveAnalysisJob.video_id == video_id,
-                LiveAnalysisJob.user_id == user_id,
-            ).order_by(LiveAnalysisJob.created_at.desc())
-        )
-        job = result.scalar_one_or_none()
+        # BUILD 36: Use duplicate-safe query
+        job = await _find_latest_job(db, video_id, user_id)
+
+        # BUILD 36: Clean up duplicates if job found
+        if job:
+            await _cleanup_duplicate_jobs(db, video_id, user_id, job.id)
+            try:
+                await db.commit()
+            except Exception:
+                pass
 
         if not job:
             # Check if a video record exists
@@ -418,7 +506,7 @@ async def get_analysis_status(
                     Video.user_id == user_id,
                 )
             )
-            video = video_result.scalar_one_or_none()
+            video = video_result.scalars().first()
 
             if video and video.upload_type == "live_boost":
                 # BUILD 30: SELF-HEALING — auto-create the missing job
@@ -597,7 +685,7 @@ async def generate_chunk_upload_url(
 
 
 # ──────────────────────────────────────────────
-# 4. Retry Analysis
+# 4. Retry Analysis (DUPLICATE-SAFE — BUILD 36)
 # ──────────────────────────────────────────────
 @router.post("/retry/{video_id}", response_model=LiveAnalysisStartResponse)
 async def retry_analysis(
@@ -608,21 +696,20 @@ async def retry_analysis(
     """
     Retry a failed or stuck analysis job.
     Can also create a job if one doesn't exist (self-healing).
+
+    BUILD 36: Uses duplicate-safe query and cleans up duplicate jobs.
     """
     try:
         user_id = current_user["id"]
         email = current_user.get("email", "")
 
-        # Find existing job
-        result = await db.execute(
-            select(LiveAnalysisJob).where(
-                LiveAnalysisJob.video_id == video_id,
-                LiveAnalysisJob.user_id == user_id,
-            )
-        )
-        job = result.scalar_one_or_none()
+        # BUILD 36: Use duplicate-safe query
+        job = await _find_latest_job(db, video_id, user_id)
 
         if job:
+            # BUILD 36: Clean up any duplicate jobs first
+            await _cleanup_duplicate_jobs(db, video_id, user_id, job.id)
+
             # Reset the job
             job.status = "pending"
             job.current_step = None
