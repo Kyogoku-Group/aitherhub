@@ -25,7 +25,7 @@ Environment=PYTHONPATH=/var/www/aitherhub:/var/www/aitherhub/worker/batch
 EnvironmentFile=/var/www/aitherhub/.env
 
 # Use the NEW independent entrypoint
-ExecStart=/usr/bin/python3 -m worker.entrypoints.queue_worker
+ExecStart=/opt/aitherhub/.venv/bin/python -m worker.entrypoints.queue_worker
 
 # Graceful shutdown
 KillSignal=SIGTERM

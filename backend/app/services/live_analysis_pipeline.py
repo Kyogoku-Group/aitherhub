@@ -90,6 +90,10 @@ class LiveAnalysisPipeline:
         job_uuid = uuid.UUID(job_id)
         logger.info(f"[pipeline] Starting analysis job={job_id} video={video_id}")
 
+        # Track temp paths for cleanup in finally block
+        assembled_path = None
+        audio_path = None
+
         try:
             # Step 1: Assemble chunks
             await self._update_step(job_uuid, "assembling", 0.0, video_id=video_id)
@@ -180,9 +184,6 @@ class LiveAnalysisPipeline:
                 f"sales_moments={len(sales_moments)} clips={len(clips)}"
             )
 
-            # Cleanup temp files
-            await self._cleanup(assembled_path, audio_path)
-
             return results
 
         except ChunkNotFoundError as exc:
@@ -243,6 +244,31 @@ class LiveAnalysisPipeline:
             except Exception as _e:
                 logger.debug(f"Suppressed: {_e}")
             raise
+
+        finally:
+            # BUILD 36: ALWAYS cleanup temp files — prevents disk from filling up
+            try:
+                await self._cleanup(assembled_path, audio_path)
+            except Exception as cleanup_err:
+                logger.warning(f"[pipeline] Cleanup failed: {cleanup_err}")
+            # Also clean up any stale liveboost_ dirs older than 1 hour
+            try:
+                import tempfile
+                import time
+                tmp_base = tempfile.gettempdir()
+                cutoff = time.time() - 3600  # 1 hour
+                for entry in os.listdir(tmp_base):
+                    if entry.startswith("liveboost_"):
+                        full_path = os.path.join(tmp_base, entry)
+                        try:
+                            if os.path.getmtime(full_path) < cutoff:
+                                import shutil
+                                shutil.rmtree(full_path, ignore_errors=True)
+                                logger.info(f"[cleanup] Removed stale dir: {full_path}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
     # ──────────────────────────────────────────
     # Step update helper

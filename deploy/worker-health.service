@@ -25,7 +25,7 @@ WorkingDirectory=/var/www/aitherhub
 Environment=PYTHONPATH=/var/www/aitherhub:/var/www/aitherhub/worker/batch
 EnvironmentFile=/var/www/aitherhub/.env
 
-ExecStart=/usr/bin/python3 -m worker.entrypoints.health_check
+ExecStart=/opt/aitherhub/.venv/bin/python -m worker.entrypoints.health_check
 
 Restart=always
 RestartSec=5
