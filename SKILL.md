@@ -165,6 +165,7 @@ curl -sf -X POST -H "X-Admin-Key: aither:hub" -H "Content-Type: application/json
 | 2026-03-13 | Frontend/JSX | JSX text content does NOT interpret `\uXXXX` Unicode escapes. Use `{'\u2728'}` (JS expression) or actual Unicode chars instead. JS string literals in props/variables DO work correctly. |
 | 2026-03-13 | Frontend/Loading | Always add safety timeouts to API-dependent loading states to prevent infinite spinners. |
 | 2026-03-13 | Backend/Decorator | Empty `@router.post()` decorator without path causes import errors — always specify path. |
+| 2026-03-13 | Frontend/Performance | `preload="auto"` on `<video>` causes full file download (14.7GB for 9h video). Use `preload="metadata"`. Also: readyState >= 2 is sufficient for playback, `#t=` media fragment helps browser seek, and minimized thumbnails should use `preload="none"`. |
 
 ---
 
