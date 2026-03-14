@@ -87,13 +87,34 @@ async def request_clip_generation(
                     "message": "Clip already generated",
                 }
             elif existing_row.status in ("pending", "processing"):
-                # Already in progress
-                return {
+                # Check if stuck (pending/processing for > 5 minutes)
+                from datetime import datetime, timedelta, timezone
+                stuck_threshold = datetime.now(timezone.utc) - timedelta(minutes=5)
+                check_stuck_sql = text("""
+                    SELECT id, created_at, updated_at FROM video_clips
+                    WHERE id = :clip_id
+                    AND COALESCE(updated_at, created_at) < :threshold
+                """)
+                stuck_result = await db.execute(check_stuck_sql, {
                     "clip_id": str(existing_row.id),
-                    "status": existing_row.status,
-                    "message": "Clip generation already in progress",
-                }
-            # If failed, create a new one
+                    "threshold": stuck_threshold,
+                })
+                stuck_row = stuck_result.fetchone()
+                if stuck_row:
+                    # Stuck clip - delete old record and create new one
+                    logger.warning(f"Clip {existing_row.id} stuck in {existing_row.status} for >5min, retrying")
+                    delete_sql = text("DELETE FROM video_clips WHERE id = :clip_id")
+                    await db.execute(delete_sql, {"clip_id": str(existing_row.id)})
+                    await db.commit()
+                    # Fall through to create new clip
+                else:
+                    # Recently created, still in progress
+                    return {
+                        "clip_id": str(existing_row.id),
+                        "status": existing_row.status,
+                        "message": "Clip generation already in progress",
+                    }
+            # If failed or stuck, create a new one
 
         # Verify video belongs to user
         video_sql = text("SELECT id, user_id, original_filename FROM videos WHERE id = :video_id")
