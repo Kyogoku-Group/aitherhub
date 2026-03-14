@@ -1595,7 +1595,9 @@ def main():
                             transcription_segments = raw_segments
                             logger.info("[PRODUCT] Loaded %d transcription segments from audio_text", len(transcription_segments))
 
-                    # Run product detection (v3: audio-first + minimal image)
+                    # Run product detection (v4.1: audio-first + sales + minimal image)
+                    # ★v4.1: duration_secを渡す（フレームが既にクリーンアップされている場合に備える）
+                    _product_duration = float(total_frames) if total_frames else (locals().get('_vid_duration') or 0)
                     exposures = detect_product_timeline(
                         frame_dir=frames_dir(video_id),
                         product_list=product_list,
@@ -1604,6 +1606,7 @@ def main():
                         on_progress=_on_product_progress,
                         excel_data=excel_data,
                         time_offset_seconds=time_offset_seconds,
+                        duration_sec=_product_duration,
                     )
 
                     logger.info("[PRODUCT] Detected %d product exposure segments", len(exposures))

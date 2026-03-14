@@ -999,9 +999,14 @@ def detect_product_timeline(
     on_progress=None,
     excel_data: dict | None = None,
     time_offset_seconds: float = 0,
+    duration_sec: float = 0,  # ★v4.1: フレームなしでも動作するよう追加
 ) -> list[dict]:
     """
-    商品タイムライン検出のメインエントリポイント (v4)。
+    商品タイムライン検出のメインエントリポイント (v4.1)。
+
+    v4.1改修:
+      - フレーム画像がなくても音声・売上データから商品検出を実行
+      - duration_sec引数を追加（フレームなし時のtotal_duration計算用）
 
     v4アーキテクチャ:
       1. 音声トランスクリプトから商品言及を検出（0秒、API不要）
@@ -1018,6 +1023,7 @@ def detect_product_timeline(
         on_progress: 進捗コールバック (0-100)
         excel_data: Excelから読み込んだ売上データ
         time_offset_seconds: 動画の時間オフセット
+        duration_sec: 動画の長さ（秒）。フレームがない場合に使用。
 
     Returns:
         exposures: [{"product_name", "brand_name", "time_start", "time_end",
@@ -1027,16 +1033,35 @@ def detect_product_timeline(
         logger.warning("[PRODUCT-v4] No product list provided, skipping detection")
         return []
 
-    files = sorted([f for f in os.listdir(frame_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-    if not files:
-        logger.warning("[PRODUCT-v4] No frames found in %s", frame_dir)
+    # ★v4.1: フレームの有無を確認（Phase 3の画像分析でのみ必要）
+    has_frames = False
+    files = []
+    try:
+        if frame_dir and os.path.isdir(frame_dir):
+            files = sorted([f for f in os.listdir(frame_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+            has_frames = len(files) > 0
+    except Exception as e:
+        logger.warning("[PRODUCT-v4] Error reading frame_dir %s: %s", frame_dir, e)
+
+    # ★v4.1: total_durationの決定（優先順位: フレーム数 > duration_sec > 売上データ > トランスクリプト）
+    if has_frames:
+        total_duration = float(len(files))  # fps=1なのでフレーム数=秒数
+    elif duration_sec > 0:
+        total_duration = float(duration_sec)
+    elif transcription_segments:
+        # トランスクリプトの最後のセグメントからdurationを推定
+        max_end = max((s.get("end", s.get("time_end", 0)) for s in transcription_segments), default=0)
+        total_duration = float(max_end) if max_end > 0 else 0
+    else:
+        total_duration = 0
+
+    if total_duration <= 0 and not has_frames:
+        logger.warning("[PRODUCT-v4] No frames and no duration info, skipping detection")
         return []
 
-    total_duration = float(len(files))  # fps=1なのでフレーム数=秒数
-
     logger.info(
-        "[PRODUCT-v4] Starting detection: %d frames (%.0f sec), %d products",
-        len(files), total_duration, len(product_list),
+        "[PRODUCT-v4] Starting detection: %d frames (%.0f sec), %d products, has_frames=%s",
+        len(files), total_duration, len(product_list), has_frames,
     )
 
     # キーワードマップを構築
@@ -1067,30 +1092,35 @@ def detect_product_timeline(
 
     # ── PHASE 3: 空白時間帯の画像分析（v4: 全ソースでギャップ判定）──
     t2 = time.time()
-    all_known = audio_exposures + sales_exposures  # ★v4: salesも含めてギャップ判定
-    gaps = find_uncovered_gaps(all_known, total_duration, min_gap=120.0)
-
     image_exposures = []
-    if gaps:
-        total_gap_duration = sum(end - start for start, end in gaps)
-        logger.info(
-            "[PRODUCT-v4] Phase 3: %d gaps (total %.0f sec), analyzing with images",
-            len(gaps), total_gap_duration,
-        )
 
-        def _on_image_progress(pct):
-            if on_progress:
-                on_progress(50 + int(pct * 0.4))
+    if has_frames and total_duration > 0:
+        # ★v4.1: フレームがある場合のみ画像分析を実行
+        all_known = audio_exposures + sales_exposures  # ★v4: salesも含めてギャップ判定
+        gaps = find_uncovered_gaps(all_known, total_duration, min_gap=120.0)
 
-        image_exposures = detect_from_images_for_gaps(
-            frame_dir=frame_dir,
-            product_list=product_list,
-            gaps=gaps,
-            sample_interval=30,
-            on_progress=_on_image_progress,
-        )
+        if gaps:
+            total_gap_duration = sum(end - start for start, end in gaps)
+            logger.info(
+                "[PRODUCT-v4] Phase 3: %d gaps (total %.0f sec), analyzing with images",
+                len(gaps), total_gap_duration,
+            )
+
+            def _on_image_progress(pct):
+                if on_progress:
+                    on_progress(50 + int(pct * 0.4))
+
+            image_exposures = detect_from_images_for_gaps(
+                frame_dir=frame_dir,
+                product_list=product_list,
+                gaps=gaps,
+                sample_interval=30,
+                on_progress=_on_image_progress,
+            )
+        else:
+            logger.info("[PRODUCT-v4] Phase 3: No significant gaps, skipping image analysis")
     else:
-        logger.info("[PRODUCT-v4] Phase 3: No significant gaps, skipping image analysis")
+        logger.info("[PRODUCT-v4] Phase 3: No frames available, skipping image analysis (audio+sales only)")
 
     logger.info("[PRODUCT-v4] Phase 3 (image): %d exposures in %.1fs", len(image_exposures), time.time() - t2)
 
@@ -1113,11 +1143,10 @@ def detect_product_timeline(
     total_time = time.time() - t0
     logger.info(
         "[PRODUCT-v4] COMPLETE: %d exposures (audio=%d, sales=%d, image=%d), "
-        "total time=%.1fs (v2 would have taken ~%d min)",
+        "total time=%.1fs, has_frames=%s",
         len(exposures),
         len(audio_exposures), len(sales_exposures), len(image_exposures),
-        total_time,
-        int(total_duration / 5) // 60,
+        total_time, has_frames,
     )
 
     return exposures
