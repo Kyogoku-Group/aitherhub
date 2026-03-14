@@ -49,6 +49,109 @@ from decouple import config
 load_dotenv()
 logger = logging.getLogger("product_detection")
 
+# ─── KATAKANA NORMALIZATION ──────────────────────────────────
+# ヴァ行→バ行、長音正規化、全角半角統一
+_KANA_NORMALIZE_MAP = {
+    'ヴァ': 'バ', 'ヴィ': 'ビ', 'ヴゥ': 'ブ', 'ヴェ': 'ベ', 'ヴォ': 'ボ',
+    'ヴ': 'ブ',
+    'ァ': 'ア', 'ィ': 'イ', 'ゥ': 'ウ', 'ェ': 'エ', 'ォ': 'オ',
+}
+
+def normalize_kana(text: str) -> str:
+    """カタカナの表記ゆれを正規化する。"""
+    result = text
+    for src, dst in _KANA_NORMALIZE_MAP.items():
+        result = result.replace(src, dst)
+    # 全角英数→半角
+    result = result.translate(str.maketrans(
+        'ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ０１２３４５６７８９',
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    ))
+    return result.lower()
+
+
+def generate_product_aliases(name: str, brand: str = "") -> list[str]:
+    """
+    商品名から検索用の別名・略称を自動生成する。
+    例: "Dr.kozu ヴァンパイアマスク" → ["dr.kozu バンパイアマスク", "ドクターコズ", "バンパイアマスク", "vampire mask", ...]
+    """
+    aliases = []
+    name_lower = name.lower().strip()
+    
+    # 1. カタカナ正規化版
+    normalized = normalize_kana(name)
+    if normalized != name_lower:
+        aliases.append(normalized)
+    
+    # 2. 英語→カタカナ変換の一般的なパターン
+    _EN_TO_KANA = {
+        'dr.': 'ドクター', 'dr ': 'ドクター', 'doctor': 'ドクター',
+        'mask': 'マスク', 'cream': 'クリーム', 'serum': 'セラム',
+        'shampoo': 'シャンプー', 'treatment': 'トリートメント',
+        'conditioner': 'コンディショナー', 'oil': 'オイル',
+        'lotion': 'ローション', 'essence': 'エッセンス',
+        'pack': 'パック', 'gel': 'ジェル', 'spray': 'スプレー',
+        'powder': 'パウダー', 'boost': 'ブースト', 'booster': 'ブースター',
+        'iron': 'アイロン', 'keratin': 'ケラチン', 'collagen': 'コラーゲン',
+        'vitamin': 'ビタミン', 'protein': 'プロテイン',
+        'vampire': 'バンパイア', 'miracle': 'ミラクル',
+    }
+    for en, kana in _EN_TO_KANA.items():
+        if en in name_lower:
+            aliases.append(kana)
+            # 英語部分をカタカナに置換した版も追加
+            replaced = name_lower.replace(en, kana)
+            aliases.append(normalize_kana(replaced))
+    
+    # 3. ブランド名のバリエーション
+    if brand:
+        brand_lower = brand.lower().strip()
+        aliases.append(brand_lower)
+        aliases.append(normalize_kana(brand))
+    
+    # 4. 「.」「-」を除去した版
+    clean = re.sub(r'[.\-_/]', ' ', name_lower).strip()
+    if clean != name_lower:
+        aliases.append(clean)
+        aliases.append(normalize_kana(clean))
+    
+    # 重複除去、空文字除去
+    return list(set(a.strip() for a in aliases if a.strip() and a.strip() != name_lower))
+
+
+def fuzzy_match_score(text: str, keyword: str, threshold: float = 0.7) -> float:
+    """
+    テキスト内にキーワードがfuzzyマッチするかチェック。
+    正規化後の部分一致 + 編集距離ベースのスコアを返す。
+    """
+    if not text or not keyword:
+        return 0.0
+    
+    text_norm = normalize_kana(text)
+    kw_norm = normalize_kana(keyword)
+    
+    # 完全一致
+    if kw_norm in text_norm:
+        return 1.0
+    
+    # 3文字未満のキーワードはfuzzyマッチしない（誤検出防止）
+    if len(kw_norm) < 3:
+        return 0.0
+    
+    # スライディングウィンドウで部分一致スコアを計算
+    kw_len = len(kw_norm)
+    best_score = 0.0
+    for i in range(len(text_norm) - kw_len + 1):
+        window = text_norm[i:i + kw_len]
+        # 一致文字数 / キーワード長
+        matches = sum(1 for a, b in zip(window, kw_norm) if a == b)
+        score = matches / kw_len
+        if score > best_score:
+            best_score = score
+    
+    return best_score if best_score >= threshold else 0.0
+
+
 # ─── ENV & CLIENT ───────────────────────────────────────────
 MAX_CONCURRENCY = 20
 
@@ -134,6 +237,7 @@ def _get_product_name(p: dict) -> str:
 def build_product_keyword_map(product_list: list[dict]) -> dict[str, list[str]]:
     """
     商品名からキーワードマップを構築。
+    v5: カタカナ正規化、英語→カタカナ変換、別名自動生成を追加。
     部分一致用に複数キーワードを生成する。
     """
     product_keywords: dict[str, list[str]] = {}
@@ -144,18 +248,33 @@ def build_product_keyword_map(product_list: list[dict]) -> dict[str, list[str]]:
         keywords = []
         # フルネーム
         keywords.append(name.lower())
+        # カタカナ正規化版
+        keywords.append(normalize_kana(name))
         # ブランド名
         brand = p.get("brand_name", p.get("brand", p.get("ブランド名", p.get("ブランド", ""))))
         if brand:
             keywords.append(brand.lower())
+            keywords.append(normalize_kana(brand))
         # 商品名を分割してキーワード化（3文字以上の単語）
         words = re.split(r'[\s　・/\-]+', name)
         for w in words:
-            w = w.strip().lower()
+            w_lower = w.strip().lower()
             skip_words = {'kyogoku', 'the', 'and', 'for', 'pro', '用', '式', '型'}
-            if len(w) >= 3 and w not in skip_words:
-                keywords.append(w)
-        product_keywords[name] = list(set(keywords))
+            if len(w_lower) >= 3 and w_lower not in skip_words:
+                keywords.append(w_lower)
+                # カタカナ正規化版も追加
+                w_norm = normalize_kana(w)
+                if w_norm != w_lower:
+                    keywords.append(w_norm)
+        # v5: 別名・略称を自動生成
+        aliases = generate_product_aliases(name, brand)
+        keywords.extend(aliases)
+        product_keywords[name] = list(set(k for k in keywords if k.strip()))
+    
+    # デバッグログ
+    for pname, kws in product_keywords.items():
+        logger.debug("[PRODUCT-v5] Keywords for '%s': %s", pname, kws[:10])
+    
     return product_keywords
 
 
@@ -181,7 +300,9 @@ def detect_from_transcription(
     product_mentions: dict[str, list[tuple[float, float, int]]] = {}
 
     for seg in transcription_segments:
-        text_lower = seg.get("text", "").lower()
+        text_raw = seg.get("text", "")
+        text_lower = text_raw.lower()
+        text_norm = normalize_kana(text_raw)  # v5: カタカナ正規化版も検索
         seg_start = seg.get("start", 0)
         seg_end = seg.get("end", 0)
 
@@ -191,8 +312,22 @@ def detect_from_transcription(
         for product_name, keywords in product_keywords.items():
             match_count = 0
             for kw in keywords:
-                if kw in text_lower and len(kw) >= 3:
+                if len(kw) < 3:
+                    continue
+                # v5: 通常の部分一致
+                if kw in text_lower:
                     match_count += 1
+                    continue
+                # v5: カタカナ正規化後の部分一致
+                kw_norm = normalize_kana(kw)
+                if kw_norm in text_norm:
+                    match_count += 1
+                    continue
+                # v5: fuzzyマッチ（4文字以上のキーワードのみ）
+                if len(kw_norm) >= 4:
+                    score = fuzzy_match_score(text_norm, kw_norm, threshold=0.75)
+                    if score >= 0.75:
+                        match_count += 1
 
             if match_count > 0:
                 if product_name not in product_mentions:
@@ -377,18 +512,36 @@ def detect_from_sales_data(
             continue
 
         matched_name = None
+        pname_lower = product_name.lower()
+        pname_norm = normalize_kana(product_name)
         for pname, keywords in product_keywords.items():
+            # v5: 通常の部分一致
             for kw in keywords:
-                if kw in product_name.lower() or product_name.lower() in kw:
+                if kw in pname_lower or pname_lower in kw:
+                    matched_name = pname
+                    break
+                # v5: カタカナ正規化後の部分一致
+                kw_norm = normalize_kana(kw)
+                if kw_norm in pname_norm or pname_norm in kw_norm:
                     matched_name = pname
                     break
             if matched_name:
                 break
-
         if not matched_name:
             if product_name in product_keywords:
                 matched_name = product_name
-
+        # v5: fuzzyマッチでのフォールバック
+        if not matched_name:
+            best_score = 0
+            for pname, keywords in product_keywords.items():
+                for kw in keywords:
+                    if len(kw) >= 4:
+                        score = fuzzy_match_score(pname_norm, normalize_kana(kw), threshold=0.8)
+                        if score > best_score:
+                            best_score = score
+                            matched_name = pname
+            if best_score < 0.8:
+                matched_name = None
         if not matched_name:
             continue
 

@@ -155,23 +155,36 @@ SUBTITLE_STYLES = [
 # DB helpers
 # =========================
 
+def update_clip_progress(clip_id: str, progress_pct: int, progress_step: str):
+    """Update clip generation progress in database."""
+    loop = get_event_loop()
+    async def _update():
+        async with get_session() as session:
+            sql = text("""
+                UPDATE video_clips
+                SET progress_pct = :pct, progress_step = :step, updated_at = NOW()
+                WHERE id = :clip_id
+            """)
+            await session.execute(sql, {"pct": progress_pct, "step": progress_step, "clip_id": clip_id})
+    loop.run_until_complete(_update())
+
+
 def update_clip_status(clip_id: str, status: str, clip_url: str = None, error_message: str = None, captions: list = None):
     """Update clip status in database."""
     loop = get_event_loop()
-
     async def _update():
         async with get_session() as session:
             if clip_url:
                 sql = text("""
                     UPDATE video_clips
-                    SET status = :status, clip_url = :clip_url, updated_at = NOW()
+                    SET status = :status, clip_url = :clip_url, progress_pct = 100, progress_step = 'completed', updated_at = NOW()
                     WHERE id = :clip_id
                 """)
                 await session.execute(sql, {"status": status, "clip_url": clip_url, "clip_id": clip_id})
             elif error_message:
                 sql = text("""
                     UPDATE video_clips
-                    SET status = :status, error_message = :error_message, updated_at = NOW()
+                    SET status = :status, error_message = :error_message, progress_step = 'error', updated_at = NOW()
                     WHERE id = :clip_id
                 """)
                 await session.execute(sql, {"status": status, "error_message": error_message, "clip_id": clip_id})
@@ -181,7 +194,7 @@ def update_clip_status(clip_id: str, status: str, clip_url: str = None, error_me
                     SET status = :status, updated_at = NOW()
                     WHERE id = :clip_id
                 """)
-                await session.execute(sql, {"status": status, "clip_id": clip_id})
+                await session.execute(sql, {"status": status, "clip_id": clip_id}))
             # Save captions (subtitle data) to DB
             if captions is not None:
                 import json as _json
@@ -1612,6 +1625,7 @@ def generate_clip(clip_id: str, video_id: str, blob_url: str, time_start: float,
 
     # Update status to processing
     update_clip_status(clip_id, "processing")
+    update_clip_progress(clip_id, 5, "downloading")
 
     work_dir = tempfile.mkdtemp(prefix=f"clip_{clip_id}_")
     logger.info(f"Work directory: {work_dir}")
@@ -1623,6 +1637,8 @@ def generate_clip(clip_id: str, video_id: str, blob_url: str, time_start: float,
 
         if not os.path.exists(source_path) or os.path.getsize(source_path) == 0:
             raise RuntimeError("Failed to download source video")
+
+        update_clip_progress(clip_id, 15, "speech_boundary")
 
         # 1.5. Speech-Aware Cut: adjust boundaries to avoid mid-sentence cuts
         logger.info("[SPEECH_CUT] Adjusting clip boundaries to speech boundaries...")
@@ -1636,11 +1652,15 @@ def generate_clip(clip_id: str, video_id: str, blob_url: str, time_start: float,
             )
             time_start, time_end = adj_start, adj_end
 
+        update_clip_progress(clip_id, 20, "cutting")
+
         # 2. Cut segment
         segment_path = os.path.join(work_dir, "segment.mp4")
         logger.info("Cutting segment...")
         if not cut_segment(source_path, segment_path, time_start, time_end):
             raise RuntimeError("Failed to cut segment")
+
+        update_clip_progress(clip_id, 30, "person_detection")
 
         # 2.5. Person detection: remove scenes without people
         person_intervals = detect_person_intervals(segment_path)
@@ -1658,6 +1678,8 @@ def generate_clip(clip_id: str, video_id: str, blob_url: str, time_start: float,
         else:
             logger.info("Person detection not available, using original segment")
 
+        update_clip_progress(clip_id, 45, "silence_removal")
+
         # 2.7. Silence detection: remove silent intervals (coughing, dead air, etc.)
         logger.info("Running silence detection...")
         silence_intervals = detect_silence_intervals(segment_path, noise_threshold="-35dB", min_silence_duration=0.8)
@@ -1672,6 +1694,8 @@ def generate_clip(clip_id: str, video_id: str, blob_url: str, time_start: float,
         else:
             logger.info("No significant silence detected")
 
+        update_clip_progress(clip_id, 55, "transcribing")
+
         # 3. Extract audio and transcribe
         audio_path = os.path.join(work_dir, "audio.wav")
         segments = []
@@ -1680,6 +1704,8 @@ def generate_clip(clip_id: str, video_id: str, blob_url: str, time_start: float,
             logger.info(f"Got {len(segments)} raw subtitle segments from Whisper")
         else:
             logger.warning("Audio extraction failed, proceeding without subtitles")
+
+        update_clip_progress(clip_id, 65, "refining_subtitles")
 
         # 3.5. GPT-4o subtitle refinement
         if segments:
@@ -1696,6 +1722,8 @@ def generate_clip(clip_id: str, video_id: str, blob_url: str, time_start: float,
             segments = refine_subtitles_with_gpt(segments, phase_context)
             logger.info(f"After GPT-4o refinement: {len(segments)} subtitle segments")
 
+        update_clip_progress(clip_id, 75, "creating_clip")
+
         # 4. Choose random TikTok style
         style = random.choice(SUBTITLE_STYLES)
         logger.info(f"Selected subtitle style: {style['name']}")
@@ -1709,6 +1737,8 @@ def generate_clip(clip_id: str, video_id: str, blob_url: str, time_start: float,
             raise RuntimeError("Output clip file is empty")
 
         logger.info(f"Clip created: {os.path.getsize(clip_path)} bytes")
+
+        update_clip_progress(clip_id, 90, "uploading")
 
         # 6. Upload to Azure Blob
         blob_info = parse_blob_url(blob_url)

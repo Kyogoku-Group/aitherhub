@@ -446,7 +446,7 @@ export default function VideoDetail({ videoData }) {
 
       setClipStates(prev => ({
         ...prev,
-        [phaseIndex]: { status: res.status || 'pending' },
+        [phaseIndex]: { status: res.status || 'pending', progress_pct: res.progress_pct || 0, progress_step: res.progress_step || '' },
       }));
 
       // Start polling for status
@@ -462,7 +462,7 @@ export default function VideoDetail({ videoData }) {
             // Show subtitle generation status
             setClipStates(prev => ({
               ...prev,
-              [phaseIndex]: { status: 'generating_subtitles', clip_url: statusRes.clip_url, clip_id: statusRes.clip_id },
+              [phaseIndex]: { status: 'generating_subtitles', clip_url: statusRes.clip_url, clip_id: statusRes.clip_id, progress_pct: 100 },
             }));
             // Await subtitle generation before marking as completed
             try {
@@ -491,13 +491,19 @@ export default function VideoDetail({ videoData }) {
               ...prev,
               [phaseIndex]: { status: 'completed', clip_url: statusRes.clip_url, clip_id: statusRes.clip_id },
             }));
-          } else if (statusRes.status === 'failed') {
+          } else if (statusRes.status === 'failed' || statusRes.status === 'dead') {
             setClipStates(prev => ({
               ...prev,
               [phaseIndex]: { status: 'failed', error: statusRes.error_message },
             }));
             clearInterval(clipPollingRef.current[phaseIndex]);
             delete clipPollingRef.current[phaseIndex];
+          } else {
+            // Update progress
+            setClipStates(prev => ({
+              ...prev,
+              [phaseIndex]: { ...prev[phaseIndex], status: statusRes.status, progress_pct: statusRes.progress_pct || 0, progress_step: statusRes.progress_step || '' },
+            }));
           }
         } catch (e) {
           // continue polling

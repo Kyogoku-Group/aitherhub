@@ -57,6 +57,12 @@ live_monitor_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="li
 live_monitor_jobs: dict[str, dict] = {}
 live_monitor_lock = Lock()
 
+# Separate executor for clip generation jobs (not subject to MAX_WORKERS)
+# Clip jobs are lightweight (10min timeout) and should not be blocked by heavy video analysis
+clip_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="clip-gen")
+clip_jobs: dict[str, dict] = {}
+clip_jobs_lock = Lock()
+
 # Graceful shutdown flag
 shutdown_requested = False
 
@@ -762,6 +768,28 @@ def poll_and_process(executor: ThreadPoolExecutor):
                     }
                 continue
 
+            # --- generate_clip: runs on separate clip executor (bypasses MAX_WORKERS) ---
+            if job_type == "generate_clip":
+                clip_id = payload.get("clip_id", job_id)
+                with clip_jobs_lock:
+                    if clip_id in clip_jobs and not clip_jobs[clip_id]["future"].done():
+                        print(f"[worker] Clip {clip_id} already in progress, skipping")
+                        continue
+                # Clean up completed clip jobs
+                with clip_jobs_lock:
+                    done_clips = [k for k, v in clip_jobs.items() if v["future"].done()]
+                    for k in done_clips:
+                        clip_jobs.pop(k, None)
+                print(f"[worker] Received generate_clip job: clip_id={clip_id} (bypasses MAX_WORKERS, uses clip_executor)")
+                future = clip_executor.submit(process_job, payload, msg.id, msg.pop_receipt)
+                with clip_jobs_lock:
+                    clip_jobs[clip_id] = {
+                        "future": future,
+                        "msg_id": msg.id,
+                        "pop_receipt": msg.pop_receipt,
+                    }
+                continue
+
             # --- Heavy jobs: subject to MAX_WORKERS ---
             if heavy_slots_full:
                 # Put message back by not processing it (visibility will expire)
@@ -912,6 +940,7 @@ def main():
     print(f"[worker] Max retries (dequeue count): {MAX_DEQUEUE_COUNT}")
     print(f"[worker] Message deletion: after successful completion only (retry on failure)")
     print(f"[worker] Poison handling: move to dead-letter queue (NEVER delete without backup)")
+    print(f"[worker] Clip executor: 2 dedicated threads (bypasses MAX_WORKERS)")
 
     # Ensure dead-letter queue exists
     try:
@@ -940,6 +969,7 @@ def main():
     finally:
         print(f"[worker] Waiting for {get_active_count()} active jobs to complete...")
         executor.shutdown(wait=True)
+        clip_executor.shutdown(wait=True)
         lock_fp.close()
         print("[worker] Worker shut down.")
 

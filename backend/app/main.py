@@ -169,6 +169,8 @@ async def ensure_tables_exist():
                 "ALTER TABLE video_clips ADD COLUMN IF NOT EXISTS subtitle_style TEXT DEFAULT 'simple'",
                 "ALTER TABLE video_clips ADD COLUMN IF NOT EXISTS subtitle_position_x REAL DEFAULT 50",
                 "ALTER TABLE video_clips ADD COLUMN IF NOT EXISTS subtitle_position_y REAL DEFAULT 85",
+                "ALTER TABLE video_clips ADD COLUMN IF NOT EXISTS progress_pct INTEGER DEFAULT 0",
+                "ALTER TABLE video_clips ADD COLUMN IF NOT EXISTS progress_step TEXT DEFAULT ''",
             ]:
                 try:
                     await conn.execute(text(col_sql))
