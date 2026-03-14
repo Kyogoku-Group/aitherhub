@@ -19,6 +19,7 @@ python-dotenv==1.0.1
 
 # ---- Async / utils ----
 httpx==0.27.0
+aiohttp>=3.9.0
 
 # ---- Logging & retry ----
 loguru==0.7.2
