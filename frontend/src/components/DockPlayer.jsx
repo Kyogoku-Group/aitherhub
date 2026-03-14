@@ -441,32 +441,46 @@ export default function DockPlayer({
       // For clip preview: video.currentTime is relative (0-based),
       // but phases use absolute time, so add timeStart as offset
       const absoluteTime = usingFullVideo ? vid.currentTime : vid.currentTime + timeStart;
-      const idx = findPhaseIndex(absoluteTime);
-      setCurrentPhaseIndex((prev) => (idx !== prev ? idx : prev));
 
-      // ── Phase Lock: auto-loop within phase boundaries ──
-      if (playMode === 'phase' && idx >= 0 && idx < reports1.length) {
-        const phase = reports1[idx];
-        const phaseEnd = Number(phase.time_end) || Infinity;
-        const phaseStart = Number(phase.time_start) || 0;
+      // ── Phase Lock: constrain playback within current phase boundaries ──
+      if (playMode === 'phase' && currentPhaseIndex >= 0 && currentPhaseIndex < reports1.length) {
+        const lockedPhase = reports1[currentPhaseIndex];
+        const phaseStart = Number(lockedPhase.time_start) || 0;
+        const phaseEnd = Number(lockedPhase.time_end) || Infinity;
 
-        if (absoluteTime >= phaseEnd - 0.05) {
-          // Loop back to phase start with brief fade
+        // If playback reached end of phase → loop back to start
+        if (absoluteTime >= phaseEnd - 0.15) {
           setLoopFade(true);
           setTimeout(() => setLoopFade(false), 150);
-
           if (usingFullVideo) {
             vid.currentTime = phaseStart;
           } else {
-            vid.currentTime = 0; // clip starts at 0
+            vid.currentTime = 0;
           }
           if (vid.paused) vid.play().catch(() => {});
+          return; // Don't update phase index after loop
+        }
+
+        // If playback drifted outside phase boundaries (e.g. user seeked via native controls)
+        if (absoluteTime < phaseStart - 0.5 || absoluteTime > phaseEnd + 0.5) {
+          // Snap back to phase start
+          if (usingFullVideo) {
+            vid.currentTime = phaseStart;
+          } else {
+            vid.currentTime = 0;
+          }
+          if (vid.paused) vid.play().catch(() => {});
+          return;
         }
       }
+
+      // Update current phase index based on time
+      const idx = findPhaseIndex(absoluteTime);
+      setCurrentPhaseIndex((prev) => (idx !== prev ? idx : prev));
     };
 
     // ── Seeking control: clamp to phase boundaries in Phase Mode ──
-    const onSeeking = () => {
+    const onSeeked = () => {
       if (playMode !== 'phase' || navLockRef.current) return;
       if (currentPhaseIndex < 0 || currentPhaseIndex >= reports1.length) return;
 
@@ -476,17 +490,18 @@ export default function DockPlayer({
       const baseOffset = usingFullVideo ? 0 : timeStart;
 
       const target = vid.currentTime + baseOffset;
-      if (target < phaseStart || target > phaseEnd) {
-        const clamped = Math.max(phaseStart, Math.min(phaseEnd, target));
-        vid.currentTime = clamped - baseOffset;
+      if (target < phaseStart - 0.5 || target > phaseEnd + 0.5) {
+        // Snap back to phase start when user seeks outside phase
+        vid.currentTime = phaseStart - baseOffset;
+        if (vid.paused) vid.play().catch(() => {});
       }
     };
 
     vid.addEventListener('timeupdate', onTimeUpdate);
-    vid.addEventListener('seeking', onSeeking);
+    vid.addEventListener('seeked', onSeeked);
     return () => {
       vid.removeEventListener('timeupdate', onTimeUpdate);
-      vid.removeEventListener('seeking', onSeeking);
+      vid.removeEventListener('seeked', onSeeked);
     };
   }, [open, findPhaseIndex, usingFullVideo, timeStart, playMode, reports1, currentPhaseIndex]);
 
@@ -535,10 +550,11 @@ export default function DockPlayer({
         case "P":
           setPlayMode('phase');
           break;
-        case "f":
-        case "F":
-          setPlayMode('full');
-          break;
+        // Full mode disabled (Phase-only mode for Sales Intelligence Player)
+        // case "f":
+        // case "F":
+        //   setPlayMode('full');
+        //   break;
         default:
           break;
       }
@@ -889,9 +905,12 @@ export default function DockPlayer({
                     <span className="text-white/50 text-[10px]">
                       Phase {currentPhaseIndex + 1} / {reports1.length}
                     </span>
-                    {playMode === 'phase' && (
-                      <span className="text-amber-400 text-[9px] font-semibold uppercase">LOOP</span>
-                    )}
+                    <span className="text-amber-400 text-[9px] font-semibold uppercase flex items-center gap-1">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M17 1l4 4-4 4" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><path d="M7 23l-4-4 4-4" /><path d="M21 13v2a4 4 0 0 1-4 4H3" />
+                      </svg>
+                      LOOP
+                    </span>
                   </div>
                 </div>
               )}
@@ -927,7 +946,15 @@ export default function DockPlayer({
                   if (!vid || !vid.duration) return;
                   const rect = e.currentTarget.getBoundingClientRect();
                   const pct = (e.clientX - rect.left) / rect.width;
-                  vid.currentTime = pct * vid.duration;
+                  let targetTime = pct * vid.duration;
+                  // In phase mode, clamp click to current phase boundaries
+                  if (playMode === 'phase' && currentPhaseIndex >= 0 && currentPhaseIndex < reports1.length) {
+                    const phase = reports1[currentPhaseIndex];
+                    const phaseStart = Number(phase.time_start) || 0;
+                    const phaseEnd = Number(phase.time_end) || Infinity;
+                    targetTime = Math.max(phaseStart, Math.min(phaseEnd - 0.1, targetTime));
+                  }
+                  vid.currentTime = targetTime;
                   if (vid.paused) vid.play().catch(() => {});
                 }}
               >
@@ -953,7 +980,15 @@ export default function DockPlayer({
                         e.stopPropagation();
                         const v = videoRef.current;
                         if (v) {
-                          v.currentTime = m.video_sec;
+                          let seekTime = m.video_sec;
+                          // In phase mode, clamp to current phase boundaries
+                          if (playMode === 'phase' && currentPhaseIndex >= 0 && currentPhaseIndex < reports1.length) {
+                            const phase = reports1[currentPhaseIndex];
+                            const phaseStart = Number(phase.time_start) || 0;
+                            const phaseEnd = Number(phase.time_end) || Infinity;
+                            seekTime = Math.max(phaseStart, Math.min(phaseEnd - 0.1, seekTime));
+                          }
+                          v.currentTime = seekTime;
                           if (v.paused) v.play().catch(() => {});
                         }
                       }}
@@ -1092,7 +1127,15 @@ export default function DockPlayer({
                           onClick={() => {
                             const v = videoRef.current;
                             if (v) {
-                              v.currentTime = m.video_sec;
+                              let seekTime = m.video_sec;
+                              // In phase mode, clamp to current phase boundaries
+                              if (playMode === 'phase' && currentPhaseIndex >= 0 && currentPhaseIndex < reports1.length) {
+                                const phase = reports1[currentPhaseIndex];
+                                const phaseStart = Number(phase.time_start) || 0;
+                                const phaseEnd = Number(phase.time_end) || Infinity;
+                                seekTime = Math.max(phaseStart, Math.min(phaseEnd - 0.1, seekTime));
+                              }
+                              v.currentTime = seekTime;
                               if (v.paused) v.play().catch(() => {});
                             }
                           }}
@@ -1619,36 +1662,17 @@ export default function DockPlayer({
               </button>
             </div>
 
-            {/* Play Mode toggle */}
+            {/* Play Mode indicator (Phase-only mode – Full button hidden) */}
             <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => setPlayMode('phase')}
-                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-semibold transition-all duration-150 ${
-                  playMode === 'phase'
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                    : 'bg-white/5 text-white/30 border border-white/10 hover:bg-white/10 hover:text-white/50'
-                }`}
-                title="Phase Mode: フェーズロック再生（自動ループ）"
+              <div
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                title="Phase Lock: フェーズロック再生（自動ループ）"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M17 1l4 4-4 4" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><path d="M7 23l-4-4 4-4" /><path d="M21 13v2a4 4 0 0 1-4 4H3" />
                 </svg>
-                Phase
-              </button>
-              <button
-                onClick={() => setPlayMode('full')}
-                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-semibold transition-all duration-150 ${
-                  playMode === 'full'
-                    ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
-                    : 'bg-white/5 text-white/30 border border-white/10 hover:bg-white/10 hover:text-white/50'
-                }`}
-                title="Full Mode: 自由再生（フェーズロック解除）"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polygon points="5 3 19 12 5 21 5 3" />
-                </svg>
-                Full
-              </button>
+                Phase Lock
+              </div>
             </div>
           </div>
         </div>
