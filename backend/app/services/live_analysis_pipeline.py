@@ -420,6 +420,17 @@ class LiveAnalysisPipeline:
                 f"Blob path: {email}/{video_id}/chunks/chunk_XXXX.mp4"
             )
 
+        output_path = os.path.join(work_dir, f"{video_id}_assembled.mp4")
+
+        if len(chunk_paths) == 1:
+            # Single chunk — just copy the file, no ffmpeg needed
+            import shutil
+            shutil.copy2(chunk_paths[0], output_path)
+            logger.info(
+                f"[assemble] Single chunk — copied directly → {output_path}"
+            )
+            return output_path
+
         # Create ffmpeg concat list
         concat_list_path = os.path.join(work_dir, "concat_list.txt")
         with open(concat_list_path, "w") as f:
@@ -427,7 +438,6 @@ class LiveAnalysisPipeline:
                 f.write(f"file '{path}'\n")
 
         # Concatenate using ffmpeg
-        output_path = os.path.join(work_dir, f"{video_id}_assembled.mp4")
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y",
             "-f", "concat",
@@ -441,8 +451,14 @@ class LiveAnalysisPipeline:
         stdout, stderr = await proc.communicate()
 
         if proc.returncode != 0:
+            stderr_text = stderr.decode(errors="replace")
+            # Log full stderr for debugging, but show only the tail in the error
+            logger.error(f"[assemble] ffmpeg stderr: {stderr_text}")
+            # Extract the actual error (skip version/config preamble)
+            error_lines = [l for l in stderr_text.splitlines() if l.strip()]
+            tail = "\n".join(error_lines[-5:]) if error_lines else stderr_text[:500]
             raise RuntimeError(
-                f"ffmpeg concat failed (rc={proc.returncode}): {stderr.decode()[:500]}"
+                f"ffmpeg concat failed (rc={proc.returncode}): {tail}"
             )
 
         logger.info(
