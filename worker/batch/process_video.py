@@ -1596,8 +1596,29 @@ def main():
                             logger.info("[PRODUCT] Loaded %d transcription segments from audio_text", len(transcription_segments))
 
                     # Run product detection (v4.1: audio-first + sales + minimal image)
-                    # ★v4.1: duration_secを渡す（フレームが既にクリーンアップされている場合に備える）
-                    _product_duration = float(total_frames) if total_frames else (locals().get('_vid_duration') or 0)
+                    # ★v4.2: duration_secを複数ソースから取得（フレーム数 > _vid_duration > DB > 0）
+                    _product_duration = 0
+                    if total_frames:
+                        _product_duration = float(total_frames)
+                    elif locals().get('_vid_duration'):
+                        _product_duration = float(locals()['_vid_duration'])
+                    else:
+                        # DBからduration_secを取得（resume時にtotal_framesがない場合）
+                        try:
+                            from db_ops import get_event_loop, AsyncSessionLocal
+                            async def _get_duration_from_db():
+                                async with AsyncSessionLocal() as sess:
+                                    r = await sess.execute(
+                                        text("SELECT COALESCE(MAX(time_end), 0) as max_t FROM video_phases WHERE video_id = :vid"),
+                                        {"vid": str(video_id)}
+                                    )
+                                    row = r.fetchone()
+                                    return float(row[0]) if row and row[0] else 0
+                            _product_duration = get_event_loop().run_until_complete(_get_duration_from_db())
+                            if _product_duration > 0:
+                                logger.info("[PRODUCT] Duration from DB phases: %.1f sec", _product_duration)
+                        except Exception as _dur_err:
+                            logger.warning("[PRODUCT] Failed to get duration from DB: %s", _dur_err)
                     exposures = detect_product_timeline(
                         frame_dir=frames_dir(video_id),
                         product_list=product_list,

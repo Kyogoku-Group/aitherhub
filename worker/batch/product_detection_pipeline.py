@@ -1055,9 +1055,26 @@ def detect_product_timeline(
     else:
         total_duration = 0
 
-    if total_duration <= 0 and not has_frames:
-        logger.warning("[PRODUCT-v4] No frames and no duration info, skipping detection")
+    # ★v4.2: excel_dataがあればtotal_duration=0でもPhase 2（売上データ検出）を実行
+    has_excel = bool(excel_data and excel_data.get("has_trend_data"))
+    if total_duration <= 0 and not has_frames and not has_excel:
+        logger.warning("[PRODUCT-v4] No frames, no duration, and no excel data, skipping detection")
         return []
+    if total_duration <= 0 and has_excel:
+        # 売上データの時間範囲からdurationを推定
+        try:
+            from csv_slot_filter import _find_key, _parse_time_to_seconds, KPI_ALIASES
+            trends = excel_data.get("trends", [])
+            if trends:
+                sample = trends[0]
+                time_key = _find_key(sample, KPI_ALIASES.get("time", []))
+                if time_key:
+                    max_t = max((_parse_time_to_seconds(e.get(time_key)) or 0) for e in trends)
+                    if max_t > 0:
+                        total_duration = float(max_t)
+                        logger.info("[PRODUCT-v4] Estimated duration from trend data: %.0f sec", total_duration)
+        except Exception as _e:
+            logger.warning("[PRODUCT-v4] Failed to estimate duration from trends: %s", _e)
 
     logger.info(
         "[PRODUCT-v4] Starting detection: %d frames (%.0f sec), %d products, has_frames=%s",
